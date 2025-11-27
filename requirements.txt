@@ -1,2 +1,4 @@
 PyQt6>=6.5
 PyQt6-Charts>=6.5
+paramiko>=3.4
+PyYAML>=6.0

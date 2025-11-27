@@ -4,17 +4,21 @@
 
 ## 功能
 - SSH 到远程服务器（使用本机 `ssh` 命令，无需额外依赖 Paramiko）
+- 支持密码或密钥登录：
+  - 若填写密码，使用 Paramiko 建立长连接（推荐）
+  - 未填写密码时，默认使用系统 `ssh`（BatchMode），也支持指定私钥
 - 每 5 秒轮询：
   - `nvidia-smi --query-gpu=...` 获取 GPU 列表、利用率、显存
   - `nvidia-smi --query-compute-apps=...` 获取占用显存的进程
   - `ps -o pid=,user= -p ...` 映射 PID 到用户名
 - 左侧表格：GPU 指标（利用率、显存进度条、进程数量）
 - 右侧饼图：按用户汇总的显存占用（MiB）
+- YAML 保存连接历史：自动填充上一次连接配置；可从下拉列表快速选择历史连接，一键登录。
 
 ## 运行
 1. 安装依赖（建议创建虚拟环境）：
    ```bash
-   pip install -r requirements.txt  # 需要 PyQt6 与 PyQt6-Charts
+   pip install -r requirements.txt  # 需要 PyQt6、PyQt6-Charts、PyYAML；如需密码登录需 Paramiko（已包含）
    ```
 2. 启动：
    ```bash
@@ -27,7 +31,11 @@
 > - 首次连接的主机指纹请先用终端 `ssh user@host` 手动确认一次（本工具以非交互模式连接）
 
 ## 使用说明
-- 登录页：输入 `Host`（`user@server` 或仅 `server`）、`Port`、可选 `Identity`、`Interval`，点击 Connect；连接验证通过后进入监控页。
+- 登录页：
+  - `Profile` 下拉：历史连接（位于 `~/.isaaclab_gpu_manager/connections.yaml`）
+  - 输入 `Host`（`server` 或 `user@server`）、`Port`、可选 `User`、`Identity`、`Password`、`Interval`
+  - 可选勾选 `Remember password (insecure)`：明文可逆（base64）写入 YAML，仅为便捷；生产环境建议不勾选
+  - 点击 Connect；连接验证通过后进入监控页。
 - 监控页：仅显示 GPU 表格与用户饼图，右上角有 `Disconnect` 返回登录页。
 
 ## 说明与限制

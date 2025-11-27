@@ -23,11 +23,10 @@ class Snapshot:
 class SSHGpuPoller(QThread):
     """Worker thread that polls a remote server via ssh to fetch GPU metrics.
 
-    It uses the local `ssh` binary to avoid extra Python dependencies. Three
-    simple commands are executed each cycle:
-      1) GPU summary
-      2) Compute apps
-      3) ps pid->user mapping (only if there are compute apps)
+    Two modes:
+      - "ssh" subprocess mode (default): uses local ssh binary, BatchMode.
+      - "paramiko" mode: used when a password is provided; maintains a persistent
+        SSH connection and runs commands via exec_command.
     """
 
     snapshot_ready = pyqtSignal(object)  # emits Snapshot
@@ -37,6 +36,8 @@ class SSHGpuPoller(QThread):
         self,
         host: str,
         port: int = 22,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         identity_file: Optional[str] = None,
         interval_sec: float = 5.0,
         ssh_bin: str = "ssh",
@@ -45,24 +46,31 @@ class SSHGpuPoller(QThread):
         super().__init__()
         self._host = host
         self._port = int(port)
+        self._username = username
+        self._password = password
         self._identity = identity_file
         self._interval = float(interval_sec)
         self._ssh_bin = ssh_bin
         self._timeout = float(timeout_sec)
         self._stop = False
+        self._pmk_client = None
+        self._use_paramiko = password is not None
 
     def stop(self) -> None:
         self._stop = True
 
     # Internal helpers -----------------------------------------------------
     def _ssh_base(self) -> List[str]:
+        dest = f"{self._username}@{self._host}" if self._username else self._host
         cmd = [self._ssh_bin, "-p", str(self._port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
         if self._identity:
             cmd += ["-i", self._identity]
-        cmd.append(self._host)
+        cmd.append(dest)
         return cmd
 
     def _run_remote(self, remote_cmd: str) -> Tuple[int, str, str]:
+        if self._use_paramiko:
+            return self._pmk_run(remote_cmd)
         cmd = self._ssh_base() + ["--", "bash", "-lc", remote_cmd]
         try:
             p = subprocess.run(
@@ -76,6 +84,66 @@ class SSHGpuPoller(QThread):
             return 124, "", "ssh command timed out"
         except Exception as e:  # noqa: BLE001 - broad ok here
             return 1, "", f"ssh error: {e}"
+
+    # Paramiko helpers ----------------------------------------------------
+    def _pmk_connect(self) -> Optional[str]:
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            return "paramiko not installed; please pip install paramiko"
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=self._host,
+                port=self._port,
+                username=self._username,
+                password=self._password,
+                key_filename=self._identity,
+                timeout=self._timeout,
+                banner_timeout=max(self._timeout, 10.0),
+                auth_timeout=max(self._timeout, 10.0),
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            self._pmk_client = client
+            return None
+        except Exception as e:  # noqa: BLE001
+            self._pmk_client = None
+            msg = str(e)
+            if "Error reading SSH protocol banner" in msg:
+                msg += \
+                    "; tip: check host/port, firewall, or increase banner timeout; " \
+                    "verify the server runs SSH on this port"
+            return msg
+
+    def _pmk_run(self, remote_cmd: str) -> Tuple[int, str, str]:
+        if self._pmk_client is None:
+            err = self._pmk_connect()
+            if err:
+                return 1, "", err
+        try:
+            # Run with bash -lc to get login-shell semantics
+            cmd = f"bash -lc {shlex.quote(remote_cmd)}"
+            stdin, stdout, stderr = self._pmk_client.exec_command(cmd, timeout=self._timeout)  # type: ignore[union-attr]
+            out = stdout.read().decode(errors="ignore")
+            err_s = stderr.read().decode(errors="ignore")
+            rc = stdout.channel.recv_exit_status()  # type: ignore[attr-defined]
+            return rc, out, err_s
+        except Exception as e:  # noqa: BLE001
+            # Try reconnect once on failure
+            err = self._pmk_connect()
+            if err:
+                return 1, "", f"reconnect failed: {err}"
+            try:
+                cmd = f"bash -lc {shlex.quote(remote_cmd)}"
+                stdin, stdout, stderr = self._pmk_client.exec_command(cmd, timeout=self._timeout)  # type: ignore[union-attr]
+                out = stdout.read().decode(errors="ignore")
+                err_s = stderr.read().decode(errors="ignore")
+                rc = stdout.channel.recv_exit_status()  # type: ignore[attr-defined]
+                return rc, out, err_s
+            except Exception as e2:  # noqa: BLE001
+                return 1, "", f"ssh error: {e2}"
 
     def _fetch_cycle(self) -> Snapshot:
         errors: List[str] = []
@@ -117,6 +185,11 @@ class SSHGpuPoller(QThread):
 
     # QThread --------------------------------------------------------------
     def run(self) -> None:  # noqa: D401 - QThread run
+        # If paramiko mode, connect once up-front
+        if self._use_paramiko:
+            err = self._pmk_connect()
+            if err:
+                self.error_msg.emit(err)
         while not self._stop and not self.isInterruptionRequested():
             snap = self._fetch_cycle()
             if snap.raw_errors:
