@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 import shlex
 import subprocess
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QToolButton,
     QSplitter,
+    QTabBar,
 )
 from PyQt6.QtCharts import QChart, QChartView, QPieSeries
 from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QPushButton, QDialog, QListWidget, QListWidgetItem
@@ -247,6 +248,30 @@ class LoginPage(QWidget):
         self.remember_cb.setChecked(bool(prof.get("remember_password", False)))
 
 
+class TopTabs(QWidget):
+    """Left-aligned top tab bar + stacked pages (workaround for centered QTabWidget on macOS)."""
+    def __init__(self) -> None:
+        super().__init__()
+        self._bar = QTabBar(movable=False)
+        self._bar.setExpanding(False)  # do not stretch; keep tabs compact
+        self._stack = QStackedWidget()
+        v = QVBoxLayout(self)
+        top = QHBoxLayout(); top.addWidget(self._bar); top.addStretch(1)
+        v.addLayout(top)
+        v.addWidget(self._stack, 1)
+        self._bar.currentChanged.connect(self._stack.setCurrentIndex)
+
+    def addTab(self, w: QWidget, title: str) -> None:
+        idx = self._stack.addWidget(w)
+        self._bar.addTab(title)
+        if self._bar.count() == 1:
+            self._bar.setCurrentIndex(0)
+            self._stack.setCurrentIndex(0)
+
+    def widget(self) -> QWidget:
+        return self
+
+
 class MonitorPage(QWidget):
     disconnect_requested = pyqtSignal()
 
@@ -265,7 +290,7 @@ class MonitorPage(QWidget):
         top.addWidget(self.os_label)
         top.addStretch(1)
         top.addWidget(self.disconnect_btn)
-        layout.addLayout(top)
+        # Note: header added into Monitor tab to keep tabs at window top
 
         center = QWidget()
         hbox = QHBoxLayout(center)
@@ -289,10 +314,6 @@ class MonitorPage(QWidget):
         # IsaacLab Runner panel -------------------------------------------
         runner_box = QGroupBox("IsaacLab Command Runner")
         r_v = QVBoxLayout(runner_box)
-        self.mode_tabs = QTabWidget()
-        self.mode_tabs.addTab(QWidget(), "train")
-        self.mode_tabs.addTab(QWidget(), "play")
-        r_v.addWidget(self.mode_tabs)
 
         # Top form: use a grid so labels align nicely
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
@@ -300,25 +321,25 @@ class MonitorPage(QWidget):
         self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_combo.setMinimumWidth(220)
         self.conda_refresh = QPushButton("Refresh envs")
         top_form = QGridLayout(); top_form.setHorizontalSpacing(12); top_form.setVerticalSpacing(6)
-        # Row 0: Script
-        top_form.addWidget(QLabel("Script"), 0, 0)
-        srow = QHBoxLayout(); srow.addWidget(self.script_edit, 1); srow.addWidget(self.script_browse)
-        srow_w = QWidget(); srow_w.setLayout(srow)
-        top_form.addWidget(srow_w, 0, 1)
-        # Row 1: Conda Env
-        top_form.addWidget(QLabel("Conda Env"), 1, 0)
-        crow = QHBoxLayout(); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
-        crow_w = QWidget(); crow_w.setLayout(crow)
-        top_form.addWidget(crow_w, 1, 1)
-        # Row 2: Presets
+        # Row 0: Presets (moved to the very top as requested)
         self.preset_combo = QComboBox(); self.preset_combo.setEditable(True); self.preset_combo.setMinimumWidth(180)
         self.preset_save = QPushButton("Save")
         self.preset_load = QPushButton("Load")
         self.preset_del = QPushButton("Delete")
         prow = QHBoxLayout(); prow.addWidget(self.preset_combo, 1); prow.addWidget(self.preset_save); prow.addWidget(self.preset_load); prow.addWidget(self.preset_del)
         prow_w = QWidget(); prow_w.setLayout(prow)
-        top_form.addWidget(QLabel("Presets"), 2, 0)
-        top_form.addWidget(prow_w, 2, 1)
+        top_form.addWidget(QLabel("Presets"), 0, 0)
+        top_form.addWidget(prow_w, 0, 1)
+        # Row 1: Script
+        top_form.addWidget(QLabel("Script"), 1, 0)
+        srow = QHBoxLayout(); srow.addWidget(self.script_edit, 1); srow.addWidget(self.script_browse)
+        srow_w = QWidget(); srow_w.setLayout(srow)
+        top_form.addWidget(srow_w, 1, 1)
+        # Row 2: Conda Env
+        top_form.addWidget(QLabel("Conda Env"), 2, 0)
+        crow = QHBoxLayout(); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
+        crow_w = QWidget(); crow_w.setLayout(crow)
+        top_form.addWidget(crow_w, 2, 1)
         top_form.setColumnStretch(1, 1)
         r_v.addLayout(top_form)
 
@@ -327,8 +348,8 @@ class MonitorPage(QWidget):
         # (script moved to top row)
         # Params table (--key=value)
         self.params_table = QTableWidget(0, 2); self.params_table.setHorizontalHeaderLabels(["param", "value"])
-        self.params_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.params_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.params_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.params_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.params_add = QPushButton("+ param"); self.params_del = QPushButton("- param")
         self.params_table.setAlternatingRowColors(True)
         left_form.addRow(self.params_table)
@@ -336,8 +357,8 @@ class MonitorPage(QWidget):
         left_form.addRow(left_btns)
         # Env table (KEY=VALUE)
         self.env_table = QTableWidget(0, 2); self.env_table.setHorizontalHeaderLabels(["env", "value"])
-        self.env_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.env_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.env_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.env_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.env_add = QPushButton("+ env"); self.env_del = QPushButton("- env")
         self.env_table.setAlternatingRowColors(True)
         right_form.addRow(self.env_table)
@@ -367,9 +388,9 @@ class MonitorPage(QWidget):
             pass
         self.output_log.setMaximumBlockCount(10000)
 
-        # Tabs: Monitor vs Runner
-        self.main_tabs = QTabWidget()
-        monitor_tab = QWidget(); mt_l = QVBoxLayout(monitor_tab); mt_l.addWidget(center, 1)
+        # Tabs: Monitor vs Runner (top-level main tabs, left-aligned)
+        self.main_tabs = TopTabs()
+        monitor_tab = QWidget(); mt_l = QVBoxLayout(monitor_tab); mt_l.addLayout(top); mt_l.addWidget(center, 1)
         runner_tab = QWidget(); rt_l = QVBoxLayout(runner_tab)
         v_split = QSplitter(Qt.Orientation.Vertical)
         v_split.addWidget(runner_box)
@@ -379,8 +400,16 @@ class MonitorPage(QWidget):
         rt_l.addWidget(v_split, 1)
         self.main_tabs.addTab(monitor_tab, "Monitor")
         self.main_tabs.addTab(runner_tab, "Runner")
-        layout.addWidget(self.main_tabs, 1)
+        layout.addWidget(self.main_tabs.widget(), 1)
 
+        # Apply 1/3 : 2/3 column ratios and wire runner buttons
+        try:
+            self.params_table.installEventFilter(self)
+            self.env_table.installEventFilter(self)
+        except Exception:
+            pass
+        self._apply_column_ratio(self.params_table, 1.0/3.0)
+        self._apply_column_ratio(self.env_table, 1.0/3.0)
         # Wire runner buttons
         self.params_add.clicked.connect(lambda: self._add_row(self.params_table))
         self.params_del.clicked.connect(lambda: self._del_selected(self.params_table))
@@ -403,6 +432,99 @@ class MonitorPage(QWidget):
         p = self.parent()
         if p and hasattr(p, "_browse_remote_script"):
             getattr(p, "_browse_remote_script")()
+
+    # Keep first column at 1/3 width, second at 2/3
+    def _apply_column_ratio(self, table: QTableWidget, r_first: float = 1.0/3.0) -> None:
+        try:
+            total = max(0, table.viewport().width())
+            c0 = int(total * max(0.05, min(0.95, r_first)))
+            c1 = max(0, total - c0)
+            table.setColumnWidth(0, c0)
+            table.setColumnWidth(1, c1)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, ev):  # type: ignore[override]
+        try:
+            if ev.type() == QEvent.Type.Resize:
+                if obj is self.params_table:
+                    self._apply_column_ratio(self.params_table, 1.0/3.0)
+                elif obj is self.env_table:
+                    self._apply_column_ratio(self.env_table, 1.0/3.0)
+        except Exception:
+            pass
+        return super().eventFilter(obj, ev)
+
+    def _add_row(self, table: QTableWidget) -> None:
+        row = table.rowCount()
+        table.insertRow(row)
+        table.setItem(row, 0, QTableWidgetItem(""))
+        table.setItem(row, 1, QTableWidgetItem(""))
+
+    def _del_selected(self, table: QTableWidget) -> None:
+        for idx in sorted({i.row() for i in table.selectedIndexes()}, reverse=True):
+            table.removeRow(idx)
+
+    def update_snapshot(self, snap: 'Snapshot') -> None:
+        rows = len(snap.gpus)
+        self.gpu_table.setRowCount(rows)
+        procs_per_uuid = {}
+        for app in snap.apps:
+            procs_per_uuid[app.gpu_uuid] = procs_per_uuid.get(app.gpu_uuid, 0) + 1
+        for r, g in enumerate(snap.gpus):
+            idx_item = QTableWidgetItem(str(g.index))
+            idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.gpu_table.setItem(r, 0, idx_item)
+            name_item = QTableWidgetItem(g.name)
+            self.gpu_table.setItem(r, 1, name_item)
+            util_item = QTableWidgetItem(f"{g.util_percent}%")
+            util_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.gpu_table.setItem(r, 2, util_item)
+            prog = QProgressBar()
+            prog.setRange(0, max(1, g.mem_total_mib))
+            prog.setValue(g.mem_used_mib)
+            prog.setFormat(f"{g.mem_used_mib} / {g.mem_total_mib} MiB")
+            self.gpu_table.setCellWidget(r, 3, prog)
+            n_procs = procs_per_uuid.get(g.uuid, 0)
+            procs_item = QTableWidgetItem(str(n_procs))
+            procs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.gpu_table.setItem(r, 4, procs_item)
+
+        # Build pie based on TOTAL VRAM across all GPUs, not just used-by-users
+        base_total = sum(max(0, g.mem_total_mib) for g in snap.gpus)
+        used_total = sum(max(0, g.mem_used_mib) for g in snap.gpus)
+        user_totals = dict(snap.user_vram_mib)
+        used_by_users = sum(max(0, v) for v in user_totals.values())
+
+        # System/other = driver/reserved/video memory not attributed to a user
+        system_other = max(0.0, float(used_total) - float(used_by_users))
+        free_rest = max(0.0, float(base_total) - float(used_total))
+
+        series = QPieSeries()
+        series.setLabelsVisible(True)
+
+        # Users first (sorted desc)
+        if user_totals:
+            for user, mib in sorted(user_totals.items(), key=lambda kv: kv[1], reverse=True):
+                val = max(0.01, float(mib))
+                series.append(f"{user} ({int(mib)} MiB)", val)
+        # Then system/other (only if non-zero)
+        if system_other > 0.5:
+            series.append(f"system/other ({int(system_other)} MiB)", system_other)
+        # Finally free rest to ensure the whole circle equals total VRAM
+        if base_total <= 0:
+            # No GPUs? show idle placeholder
+            series.append("idle", 1)
+        elif free_rest > 0.5:
+            series.append(f"free ({int(free_rest)} MiB)", free_rest)
+
+        chart = QChart()
+        chart.addSeries(series)
+        chart.setTitle("VRAM Total = users + system + free (MiB)")
+        chart.legend().setVisible(True)
+        chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
+        chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
+        self.chart_view.setChart(chart)
 
 
 class RemoteFileDialog(QDialog):
@@ -574,7 +696,8 @@ class RemoteFileDialog(QDialog):
 
     # Runner wiring helpers ----------------------------------------------
     def get_mode(self) -> str:
-        return "train" if self.mode_tabs.currentIndex() == 0 else "play"
+        # Mode tabs removed; always return single default mode
+        return "default"
 
 
 
@@ -663,7 +786,8 @@ class MainWindow(QMainWindow):
         self.login_page = LoginPage()
         self.monitor_page = MonitorPage()
         self.stack.addWidget(self.login_page)
-        self.stack.addWidget(self.monitor_page)
+        # Show top-level tabs (Monitor/Runner) as the connected page
+        self.stack.addWidget(self.monitor_page.main_tabs)
         self.setCentralWidget(self.stack)
 
         # Status bar
@@ -681,7 +805,7 @@ class MainWindow(QMainWindow):
         self.monitor_page.script_edit.textChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.params_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.env_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
-        self.monitor_page.mode_tabs.currentChanged.connect(lambda _=None: self._load_runner_config())
+        # Mode tabs removed; no mode change signal
         # Refresh envs: pass from_click=True to control UI feedback
         self.monitor_page.conda_refresh.clicked.connect(lambda: self._detect_remote_conda_envs(True))
         # Preset actions
@@ -927,14 +1051,8 @@ class MainWindow(QMainWindow):
 
     # Runner command build/run -------------------------------------------
     def _collect_runner(self) -> Dict[str, Any]:
-        # Be defensive: get_mode may not exist early during UI construction
-        get_mode = getattr(self.monitor_page, 'get_mode', None)
-        mode = 'train'
-        try:
-            if callable(get_mode):
-                mode = str(get_mode()) or 'train'
-        except Exception:
-            mode = 'train'
+        # Single-mode runner
+        mode = 'default'
         conda_env = self.monitor_page.conda_combo.currentText().strip()
         script = self.monitor_page.script_edit.text().strip()
         # params
@@ -1022,7 +1140,7 @@ class MainWindow(QMainWindow):
         key = self._host_key()
         if not key:
             return
-        mode = self.monitor_page.get_mode() if hasattr(self.monitor_page, 'get_mode') else 'train'
+        mode = 'default'
         r = config_store.load_runner(self._config, key, mode)
         self._apply_runner_fields(r)
 
