@@ -177,14 +177,21 @@ class CondaEnvListJob(QThread):
         # Build robust detection script: source common conda.sh locations, then try JSON, then text, finally list envs directories
         detect_script = (
             "echo '[conda-detect] start' 1>&2; "
+            "echo '[conda-detect] whoami='$(whoami)' shell='$SHELL 1>&2; "
             "(command -v conda >/dev/null 2>&1 && echo '[conda-detect] conda found in PATH' 1>&2) || "
             "(echo '[conda-detect] sourcing common conda.sh locations' 1>&2; "
             " source ~/.bashrc >/dev/null 2>&1 || true; "
-            " for p in ~/miniconda3/etc/profile.d/conda.sh ~/anaconda3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh; do "
-            "   if [ -f \"$p\" ]; then echo \"[conda-detect] source $p\" 1>&2; source \"$p\" >/dev/null 2>&1; break; fi; done; "
+            " for p in \n"
+            "   ~/miniconda3/etc/profile.d/conda.sh \n"
+            "   ~/anaconda3/etc/profile.d/conda.sh \n"
+            "   /opt/conda/etc/profile.d/conda.sh \n"
+            "   ~/mambaforge/etc/profile.d/conda.sh \n"
+            "   ~/micromamba/etc/profile.d/conda.sh \n"
+            " ; do if [ -f \"$p\" ]; then echo \"[conda-detect] source $p\" 1>&2; source \"$p\" >/dev/null 2>&1; break; fi; done; "
             " eval \"$(conda shell.bash hook 2>/dev/null)\" || true); "
             "(conda env list --json 2>/dev/null) || (conda info --envs 2>/dev/null) || "
-            "(ls -1d ~/miniconda3/envs/* ~/anaconda3/envs/* /opt/conda/envs/* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)"
+            "(mamba env list --json 2>/dev/null) || (micromamba env list --json 2>/dev/null) || "
+            "(ls -1d ~/miniconda3/envs/* ~/anaconda3/envs/* /opt/conda/envs/* ~/mambaforge/envs/* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)"
         )
 
         if self._password:
@@ -205,7 +212,7 @@ class CondaEnvListJob(QThread):
                     look_for_keys=True,
                 )
                 cmd = f"bash -lc {shlex.quote(detect_script)}"
-                stdin, stdout, stderr = client.exec_command(cmd, timeout=15)
+                stdin, stdout, stderr = client.exec_command(cmd, timeout=20)
                 out = stdout.read().decode(errors="ignore")
                 err = stderr.read().decode(errors="ignore")
                 client.close()
@@ -222,6 +229,9 @@ class CondaEnvListJob(QThread):
         rc, out, err = self._run_remote(detect_script)
         if rc != 0 and err:
             self.debug.emit(err)
+        # Also emit stdout when debugging to help diagnosis
+        if out:
+            self.debug.emit(out)
         envs = self._parse_envs(out)
         self.result.emit(envs)
 

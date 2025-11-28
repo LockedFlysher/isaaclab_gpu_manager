@@ -530,6 +530,8 @@ class MainWindow(QMainWindow):
         self.monitor_page.params_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.env_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.mode_tabs.currentChanged.connect(lambda _=None: self._load_runner_config())
+        self.monitor_page.conda_refresh.clicked.connect(self._detect_remote_conda_envs)
+        self.monitor_page.conda_refresh.clicked.connect(self._detect_remote_conda_envs)
 
         # Load profiles
         self._refresh_profiles()
@@ -784,9 +786,21 @@ class MainWindow(QMainWindow):
         hp = self._host_params
         if not hp:
             return
+        # Disable refresh button while running and add status
+        try:
+            self.monitor_page.conda_refresh.setEnabled(False)
+        except Exception:
+            pass
+        self.status.showMessage("Refreshing remote conda environments…")
         job = CondaEnvListJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
         job.result.connect(self._on_conda_envs)
-        job.error.connect(lambda m: self.status.showMessage(m, 5000))
+        # Mirror errors to output when Debug is checked
+        job.error.connect(lambda m: (self.status.showMessage(m, 5000), self.monitor_page.output_log.appendPlainText(m) if getattr(self.monitor_page, 'debug_cb', None) and self.monitor_page.debug_cb.isChecked() else None))
+        # CondaEnvListJob emits debug logs on stderr; mirror to Output when Debug is checked
+        try:
+            job.debug.connect(lambda m: (self.monitor_page.debug_cb.isChecked() and self.monitor_page.output_log.appendPlainText(m.rstrip("\n"))))
+        except Exception:
+            pass
         job.setParent(self)
         self._bg_jobs.append(job)
         job.finished.connect(lambda: self._bg_jobs.remove(job) if job in self._bg_jobs else None)
@@ -801,6 +815,14 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.monitor_page.conda_combo.setCurrentIndex(idx)
                 break
+        self.status.showMessage(f"Conda environments detected: {len(envs)}", 5000)
+        # Re-enable refresh button
+        try:
+            self.monitor_page.conda_refresh.setEnabled(True)
+        except Exception:
+            pass
+        if not envs and hasattr(self.monitor_page, 'output_log'):
+            self.monitor_page.output_log.appendPlainText("[conda-detect] No environments detected; type name manually or adjust init path.")
 
 
 def main() -> None:
