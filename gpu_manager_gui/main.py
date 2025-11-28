@@ -364,12 +364,17 @@ class MonitorPage(QWidget):
         # Row 2: Conda / Docker
         top_form.addWidget(QLabel("Conda / Docker"), 2, 0)
         self.use_docker_cb = QCheckBox("Docker")
-        self.docker_combo = QComboBox(); self.docker_combo.setEditable(False); self.docker_combo.setMinimumWidth(220)
+        self.docker_combo = QComboBox(); self.docker_combo.setEditable(False); self.docker_combo.setMinimumWidth(200)
         self.docker_refresh = QPushButton("Refresh containers")
+        self.use_compose_cb = QCheckBox("Compose")
+        self.compose_dir_edit = QLineEdit(); self.compose_dir_edit.setPlaceholderText("/path/to/compose dir (e.g. ~/PycharmProjects/.../docker)")
+        self.compose_service_edit = QLineEdit(); self.compose_service_edit.setPlaceholderText("service name (e.g. isaac-lab-nhb)")
         crow = QHBoxLayout();
         crow.addWidget(QLabel("Conda")); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
         crow.addSpacing(12)
         crow.addWidget(self.use_docker_cb); crow.addWidget(self.docker_combo, 1); crow.addWidget(self.docker_refresh)
+        crow.addSpacing(12)
+        crow.addWidget(self.use_compose_cb); crow.addWidget(self.compose_dir_edit, 1); crow.addWidget(self.compose_service_edit, 1)
         crow_w = QWidget(); crow_w.setLayout(crow)
         top_form.addWidget(crow_w, 2, 1)
         top_form.setColumnStretch(1, 1)
@@ -477,6 +482,10 @@ class MonitorPage(QWidget):
             self.docker_refresh.hide()
         except Exception:
             pass
+        # Compose wiring
+        self.use_compose_cb.toggled.connect(lambda _=None: self.preview_update_req.emit())
+        self.compose_dir_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
+        self.compose_service_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
         # Preset buttons are wired in MainWindow for lifecycle
 
     def _on_refresh_conda(self) -> None:
@@ -542,6 +551,7 @@ class MonitorPage(QWidget):
             self.conda_refresh.setEnabled(True)
             self.docker_combo.setEnabled(checked)
             # Legacy docker_refresh hidden in unified mode; ignore enable
+            # Compose behaves independently; no auto-disable here
         except Exception:
             pass
         # Auto refresh container list when toggled on
@@ -1254,6 +1264,9 @@ class MainWindow(QMainWindow):
         conda_env = self.monitor_page.conda_combo.currentText().strip()
         use_docker = bool(self.monitor_page.use_docker_cb.isChecked())
         docker_container = self.monitor_page.docker_combo.currentText().strip()
+        use_compose = bool(getattr(self.monitor_page, 'use_compose_cb', None) and self.monitor_page.use_compose_cb.isChecked())
+        compose_dir = self.monitor_page.compose_dir_edit.text().strip() if hasattr(self.monitor_page, 'compose_dir_edit') else ""
+        compose_service = self.monitor_page.compose_service_edit.text().strip() if hasattr(self.monitor_page, 'compose_service_edit') else ""
         script = self.monitor_page.script_edit.text().strip()
         # params
         params = []
@@ -1273,7 +1286,18 @@ class MainWindow(QMainWindow):
             v = (v_item.text() if v_item else "").strip()
             if k:
                 env.append([k, v])
-        return {"mode": mode, "conda_env": conda_env, "use_docker": use_docker, "docker_container": docker_container, "script": script, "params": params, "env": env}
+        return {
+            "mode": mode,
+            "conda_env": conda_env,
+            "use_docker": use_docker,
+            "docker_container": docker_container,
+            "use_compose": use_compose,
+            "compose_dir": compose_dir,
+            "compose_service": compose_service,
+            "script": script,
+            "params": params,
+            "env": env,
+        }
 
     def _build_python_cmd(self, runner: Dict[str, Any]) -> str:
         script = runner.get("script") or ""
@@ -1297,12 +1321,57 @@ class MainWindow(QMainWindow):
             base = self._build_python_cmd(r)
             use_docker = bool(r.get("use_docker"))
             docker_container = (r.get("docker_container") or "").strip() if use_docker else None
+            use_compose = bool(r.get("use_compose"))
+            compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
+            compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
+
+            # Compose exec mode takes precedence when enabled and fields provided
+            if use_compose and compose_dir and compose_service:
+                import shlex as _sh
+                exports = " ".join(f"{k}={_sh.quote(v)}" for k, v in env_dict.items()) if env_dict else ""
+                conda_name = (r.get("conda_env") or "base")
+                # Build robust inner like docker exec path: try python variants; fallback to conda run
+                py_call_q = _sh.quote(base)
+                env_prefix_q = _sh.quote(exports) if exports else ""
+                inner_script = (
+                    "PY_CALL=" + py_call_q + "; "
+                    "ENV_PREFIX=" + (env_prefix_q or "\"\"") + "; "
+                    "ok=0; for PY in python python3 /usr/bin/python3 /usr/local/bin/python3; do "
+                    "  if command -v \"$PY\" >/dev/null 2>&1; then "
+                    "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /$PY }\"; "
+                    "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX $CMD\"; else eval \"$CMD\"; fi; ok=1; break; "
+                    "  fi; "
+                    "done; "
+                    "if [ \"$ok\" -eq 0 ]; then "
+                    "  (source ~/.bashrc >/dev/null 2>&1 || true); "
+                    "  for p in ~/miniconda3/etc/profile.d/conda.sh ~/anaconda3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" >/dev/null 2>&1 && break; done; "
+                    "  if command -v conda >/dev/null 2>&1; then "
+                    "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /python }\"; "
+                    "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; else eval \"conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; fi; ok=1; "
+                    "  fi; "
+                    "fi; "
+                    "if [ \"$ok\" -eq 0 ]; then echo '[compose-run] python not found in container' 1>&2; exit 127; fi"
+                )
+                final = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner_script)}"
+                self.monitor_page.preview_edit.setText(final)
+                # Autosave when in compose mode as well
+                try:
+                    self._autosave_runner(r)
+                except Exception:
+                    pass
+                return
+
             if use_docker and not docker_container:
                 # Show a helpful placeholder to indicate docker mode is active
                 inner = f"docker exec -i <container> bash -lc {shlex.quote(base)}"
             else:
                 inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None if not docker_container else None), base_cmd=base, docker_container=docker_container)
             self.monitor_page.preview_edit.setText(inner)
+            # Auto-save runner config silently when connected
+            try:
+                self._autosave_runner(r)
+            except Exception:
+                pass
         except Exception as e:
             # Don't crash UI if preview build fails transiently
             try:
@@ -1437,6 +1506,21 @@ class MainWindow(QMainWindow):
         job.finished.connect(_finished_cleanup)
         job.start()
     
+    def _autosave_runner(self, runner: Dict[str, Any] | None = None) -> None:
+        # Save current runner config (including compose fields) if connected
+        key = self._host_key()
+        if not key:
+            return
+        r = runner or self._collect_runner()
+        try:
+            config_store.save_runner(self._config, key, r.get("mode", "default"), r)
+            # Print to terminal for visibility once in a while
+            try:
+                sys.stdout.write("[autosave] runner saved for %s\n" % key); sys.stdout.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
     def _on_conda_envs(self, envs: list) -> None:
         self.monitor_page.conda_combo.clear()
         self.monitor_page.conda_combo.addItems(envs or [])
@@ -1568,6 +1652,13 @@ class MainWindow(QMainWindow):
             self.monitor_page.conda_combo.setCurrentText(r.get("conda_env", ""))
             self.monitor_page.use_docker_cb.setChecked(bool(r.get("use_docker", False)))
             self.monitor_page.docker_combo.setCurrentText(r.get("docker_container", ""))
+            # Compose fields
+            if hasattr(self.monitor_page, 'use_compose_cb'):
+                self.monitor_page.use_compose_cb.setChecked(bool(r.get("use_compose", False)))
+            if hasattr(self.monitor_page, 'compose_dir_edit'):
+                self.monitor_page.compose_dir_edit.setText(r.get("compose_dir", ""))
+            if hasattr(self.monitor_page, 'compose_service_edit'):
+                self.monitor_page.compose_service_edit.setText(r.get("compose_service", ""))
             self.monitor_page.script_edit.setText(r.get("script", ""))
             # params
             self.monitor_page.params_table.setRowCount(0)
@@ -1610,7 +1701,7 @@ class MainWindow(QMainWindow):
             return
         r = self._collect_runner()
         config_store.save_runner_preset(self._config, name, r)
-        self.status.showMessage(f"Saved preset '{name}'")
+        self.status.showMessage(f"Saved preset '{name}' (compose={bool(r.get('use_compose'))})")
         self._refresh_presets()
 
     def _load_preset_into_ui(self) -> None:

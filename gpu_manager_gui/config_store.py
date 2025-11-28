@@ -138,6 +138,9 @@ def load_runner(cfg: Dict[str, Any], key: str, mode: str) -> Dict[str, Any]:
     r.setdefault("env", [])     # list of [key, value]
     r.setdefault("use_docker", False)
     r.setdefault("docker_container", "")
+    r.setdefault("use_compose", False)
+    r.setdefault("compose_dir", "")
+    r.setdefault("compose_service", "")
     return r
 
 
@@ -149,6 +152,9 @@ def save_runner(cfg: Dict[str, Any], key: str, mode: str, runner: Dict[str, Any]
         "env": runner.get("env", []),
         "use_docker": bool(runner.get("use_docker", False)),
         "docker_container": runner.get("docker_container", ""),
+        "use_compose": bool(runner.get("use_compose", False)),
+        "compose_dir": runner.get("compose_dir", ""),
+        "compose_service": runner.get("compose_service", ""),
     }
     save_config(cfg)
 
@@ -171,6 +177,9 @@ def load_runner_preset(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
     p.setdefault("env", [])
     p.setdefault("use_docker", False)
     p.setdefault("docker_container", "")
+    p.setdefault("use_compose", False)
+    p.setdefault("compose_dir", "")
+    p.setdefault("compose_service", "")
     return p
 
 
@@ -184,6 +193,9 @@ def save_runner_preset(cfg: Dict[str, Any], name: str, runner: Dict[str, Any]) -
         "env": runner.get("env", []),
         "use_docker": bool(runner.get("use_docker", False)),
         "docker_container": runner.get("docker_container", ""),
+        "use_compose": bool(runner.get("use_compose", False)),
+        "compose_dir": runner.get("compose_dir", ""),
+        "compose_service": runner.get("compose_service", ""),
     }
     save_config(cfg)
 

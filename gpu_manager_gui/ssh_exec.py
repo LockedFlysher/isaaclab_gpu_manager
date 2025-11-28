@@ -41,7 +41,8 @@ def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_c
             "fi; "
             "if [ \"$ok\" -eq 0 ]; then echo '[docker-run] python not found in container' 1>&2; exit 127; fi"
         )
-        return f"docker exec -i {_sh.quote(docker_container)} bash -lc {_sh.quote(inner_script)}"
+        # Use login shell (-l) to pick up /etc/profile and system PATH adjustments
+        return f"docker exec -i {_sh.quote(docker_container)} bash -l -c {_sh.quote(inner_script)}"
     if conda_env:
         # Prefer conda run; fallback to activation via conda.sh
         run = f"conda run -n {shlex.quote(conda_env)} --no-capture-output {cmd}"
