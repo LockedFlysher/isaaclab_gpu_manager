@@ -365,3 +365,93 @@ class RemoteOSInfoJob(QThread):
                 self.error.emit((p.stderr or "os info command failed").strip())
         except Exception as e:  # noqa: BLE001
             self.error.emit(str(e))
+
+class RemoteListDirJob(QThread):
+    """List a remote directory via SSH and emit (cwd, entries) where entries is a list of dicts.
+
+    Each entry: { 'name': str, 'type': 'D'|'F'|'O' }
+    """
+    result = pyqtSignal(str, list)
+    error = pyqtSignal(str)
+
+    def __init__(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str], path: Optional[str] = None) -> None:
+        super().__init__()
+        self._host = host
+        self._port = int(port)
+        self._user = username
+        self._identity = identity
+        self._password = password
+        self._path = path or ""
+
+    def _run_remote(self, inner: str) -> Tuple[int, str, str]:
+        dest = f"{self._user}@{self._host}" if self._user else self._host
+        cmd = ["ssh", "-p", str(self._port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+        if self._identity:
+            cmd += ["-i", self._identity]
+        cmd += [dest, "--", "bash", "-lc", inner]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return p.returncode, p.stdout, p.stderr
+        except Exception as e:  # noqa: BLE001
+            return 1, "", str(e)
+
+    def run(self) -> None:  # type: ignore[override]
+        # Resolve directory and list entries. Print CWD on first line.
+        inner = (
+            "DIR=\"%s\"; " % shlex.quote(self._path)
+            + "if [ -z \"$DIR\" ]; then DIR=\"$HOME\"; fi; "
+            + "cd \"$DIR\" 2>/dev/null || { echo '__ERR__ cannot cd'; exit 2; }; pwd; "
+            + "ls -1pA | while IFS= read -r n; do "
+            + "if [ -d \"$n\" ]; then printf 'D\t%s\n' \"$n\"; "
+            + "elif [ -f \"$n\" ]; then printf 'F\t%s\n' \"$n\"; "
+            + "else printf 'O\t%s\n' \"$n\"; fi; done"
+        )
+        if self._password:
+            try:
+                import paramiko  # type: ignore
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=self._host,
+                    port=self._port,
+                    username=self._user,
+                    password=self._password,
+                    key_filename=self._identity,
+                    timeout=10.0,
+                    banner_timeout=15.0,
+                    auth_timeout=15.0,
+                    allow_agent=True,
+                    look_for_keys=True,
+                )
+                cmd = f"bash -lc {shlex.quote(inner)}"
+                _, stdout, stderr = client.exec_command(cmd, timeout=12)
+                out = stdout.read().decode(errors="ignore")
+                err = stderr.read().decode(errors="ignore")
+                client.close()
+                if err and not out:
+                    self.error.emit(err.strip())
+                    return
+            except Exception as e:  # noqa: BLE001
+                self.error.emit(str(e))
+                return
+        else:
+            rc, out, err = self._run_remote(inner)
+            if rc != 0 and err and not out:
+                self.error.emit(err.strip())
+                return
+        lines = (out or "").splitlines()
+        if not lines:
+            self.error.emit("empty listing output")
+            return
+        cwd = lines[0].strip()
+        entries = []
+        for ln in lines[1:]:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                t, name = ln.split('\t', 1)
+            except ValueError:
+                t, name = 'O', ln
+            entries.append({'type': t, 'name': name})
+        self.result.emit(cwd, entries)

@@ -19,7 +19,14 @@ def make_key(host: str, port: int, username: Optional[str]) -> str:
 
 
 def _default_config() -> Dict[str, Any]:
-    return {"version": 1, "last_used_key": None, "auto_connect_last_used": False, "profiles": {}, "runners": {}}
+    return {
+        "version": 1,
+        "last_used_key": None,
+        "auto_connect_last_used": False,
+        "profiles": {},
+        "runners": {},           # per-host+mode saved state
+        "runner_presets": {},     # named, host-agnostic presets
+    }
 
 
 def load_config() -> Dict[str, Any]:
@@ -38,10 +45,13 @@ def load_config() -> Dict[str, Any]:
         data.setdefault("auto_connect_last_used", False)
         data.setdefault("profiles", {})
         data.setdefault("runners", {})
+        data.setdefault("runner_presets", {})
         if not isinstance(data["profiles"], dict):
             data["profiles"] = {}
         if not isinstance(data["runners"], dict):
             data["runners"] = {}
+        if not isinstance(data.get("runner_presets", {}), dict):
+            data["runner_presets"] = {}
         return data
     except Exception:
         return _default_config()
@@ -137,3 +147,43 @@ def save_runner(cfg: Dict[str, Any], key: str, mode: str, runner: Dict[str, Any]
         "env": runner.get("env", []),
     }
     save_config(cfg)
+
+
+# Runner presets (host-agnostic) -------------------------------------------
+def list_runner_presets(cfg: Dict[str, Any]) -> list[str]:
+    pres = cfg.get("runner_presets", {})
+    if not isinstance(pres, dict):
+        return []
+    return sorted(pres.keys())
+
+
+def load_runner_preset(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
+    p = cfg.get("runner_presets", {}).get(name) or {}
+    if not isinstance(p, dict):
+        p = {}
+    p.setdefault("conda_env", "")
+    p.setdefault("script", "")
+    p.setdefault("params", [])
+    p.setdefault("env", [])
+    return p
+
+
+def save_runner_preset(cfg: Dict[str, Any], name: str, runner: Dict[str, Any]) -> None:
+    if not name:
+        return
+    cfg.setdefault("runner_presets", {})[name] = {
+        "conda_env": runner.get("conda_env", ""),
+        "script": runner.get("script", ""),
+        "params": runner.get("params", []),
+        "env": runner.get("env", []),
+    }
+    save_config(cfg)
+
+
+def delete_runner_preset(cfg: Dict[str, Any], name: str) -> None:
+    try:
+        if name in cfg.get("runner_presets", {}):
+            del cfg["runner_presets"][name]
+            save_config(cfg)
+    except Exception:
+        pass

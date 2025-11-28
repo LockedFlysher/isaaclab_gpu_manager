@@ -36,14 +36,15 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QToolButton,
+    QSplitter,
 )
 from PyQt6.QtCharts import QChart, QChartView, QPieSeries
-from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QPushButton
+from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QPushButton, QDialog, QListWidget, QListWidgetItem
 
 # Support both `python -m gpu_manager_gui.main` and direct script run
 try:
     from .ssh_worker import SSHGpuPoller, Snapshot
-    from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob
+    from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob, RemoteListDirJob
     from . import config_store
 except Exception:  # running as a script: fix sys.path and import absolutely
     import os as _os, sys as _sys
@@ -52,6 +53,7 @@ except Exception:  # running as a script: fix sys.path and import absolutely
     from gpu_manager_gui.ssh_exec import SSHCommandJob
     from gpu_manager_gui.ssh_exec import RemoteOSInfoJob
     from gpu_manager_gui.ssh_exec import CondaEnvListJob
+    from gpu_manager_gui.ssh_exec import RemoteListDirJob
     from gpu_manager_gui import config_store
 
 
@@ -292,19 +294,33 @@ class MonitorPage(QWidget):
         self.mode_tabs.addTab(QWidget(), "play")
         r_v.addWidget(self.mode_tabs)
 
-        # Top row: script (left) and conda env (right)
+        # Top form: use a grid so labels align nicely
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
-        self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_refresh = QPushButton("Refresh envs")
-        top_row = QHBoxLayout()
-        # Left: script
-        top_row.addWidget(QLabel("script"))
-        top_row.addWidget(self.script_edit, 2)
-        top_row.addSpacing(12)
-        # Right: conda env
-        top_row.addWidget(QLabel("conda env"))
-        top_row.addWidget(self.conda_combo, 1)
-        top_row.addWidget(self.conda_refresh)
-        r_v.addLayout(top_row)
+        self.script_browse = QToolButton(); self.script_browse.setText("Browse")
+        self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_combo.setMinimumWidth(220)
+        self.conda_refresh = QPushButton("Refresh envs")
+        top_form = QGridLayout(); top_form.setHorizontalSpacing(12); top_form.setVerticalSpacing(6)
+        # Row 0: Script
+        top_form.addWidget(QLabel("Script"), 0, 0)
+        srow = QHBoxLayout(); srow.addWidget(self.script_edit, 1); srow.addWidget(self.script_browse)
+        srow_w = QWidget(); srow_w.setLayout(srow)
+        top_form.addWidget(srow_w, 0, 1)
+        # Row 1: Conda Env
+        top_form.addWidget(QLabel("Conda Env"), 1, 0)
+        crow = QHBoxLayout(); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
+        crow_w = QWidget(); crow_w.setLayout(crow)
+        top_form.addWidget(crow_w, 1, 1)
+        # Row 2: Presets
+        self.preset_combo = QComboBox(); self.preset_combo.setEditable(True); self.preset_combo.setMinimumWidth(180)
+        self.preset_save = QPushButton("Save")
+        self.preset_load = QPushButton("Load")
+        self.preset_del = QPushButton("Delete")
+        prow = QHBoxLayout(); prow.addWidget(self.preset_combo, 1); prow.addWidget(self.preset_save); prow.addWidget(self.preset_load); prow.addWidget(self.preset_del)
+        prow_w = QWidget(); prow_w.setLayout(prow)
+        top_form.addWidget(QLabel("Presets"), 2, 0)
+        top_form.addWidget(prow_w, 2, 1)
+        top_form.setColumnStretch(1, 1)
+        r_v.addLayout(top_form)
 
         form_row = QHBoxLayout()
         left_form = QFormLayout(); right_form = QFormLayout()
@@ -314,6 +330,7 @@ class MonitorPage(QWidget):
         self.params_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.params_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.params_add = QPushButton("+ param"); self.params_del = QPushButton("- param")
+        self.params_table.setAlternatingRowColors(True)
         left_form.addRow(self.params_table)
         left_btns = QHBoxLayout(); left_btns.addWidget(self.params_add); left_btns.addWidget(self.params_del); left_btns.addStretch(1)
         left_form.addRow(left_btns)
@@ -322,26 +339,44 @@ class MonitorPage(QWidget):
         self.env_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.env_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.env_add = QPushButton("+ env"); self.env_del = QPushButton("- env")
+        self.env_table.setAlternatingRowColors(True)
         right_form.addRow(self.env_table)
         right_btns = QHBoxLayout(); right_btns.addWidget(self.env_add); right_btns.addWidget(self.env_del); right_btns.addStretch(1)
         right_form.addRow(right_btns)
-        form_row.addLayout(left_form, 1); form_row.addLayout(right_form, 1)
-        r_v.addLayout(form_row)
+        # Put the two forms into a splitter so user can resize
+        lr_split = QSplitter(Qt.Orientation.Horizontal)
+        lw = QWidget(); lw.setLayout(left_form)
+        rw = QWidget(); rw.setLayout(right_form)
+        lr_split.addWidget(lw); lr_split.addWidget(rw)
+        lr_split.setStretchFactor(0, 1); lr_split.setStretchFactor(1, 1)
+        r_v.addWidget(lr_split, 1)
 
         # Preview + Run
         self.preview_edit = QLineEdit(); self.preview_edit.setReadOnly(True)
         self.run_btn = QPushButton("Run")
-        pr = QHBoxLayout(); pr.addWidget(QLabel("preview")); pr.addWidget(self.preview_edit, 1); pr.addWidget(self.run_btn)
+        self.clear_log_btn = QToolButton(); self.clear_log_btn.setText("Clear Log")
+        pr = QHBoxLayout(); pr.addWidget(QLabel("Preview")); pr.addWidget(self.preview_edit, 1); pr.addWidget(self.run_btn); pr.addWidget(self.clear_log_btn)
         r_v.addLayout(pr)
 
-        # Output log
+        # Output log moves outside the box into a resizable splitter
         self.output_log = QPlainTextEdit(); self.output_log.setReadOnly(True)
-        r_v.addWidget(self.output_log, 1)
+        try:
+            from PyQt6.QtWidgets import QPlainTextEdit as _QPE
+            self.output_log.setLineWrapMode(_QPE.LineWrapMode.NoWrap)
+        except Exception:
+            pass
+        self.output_log.setMaximumBlockCount(10000)
 
         # Tabs: Monitor vs Runner
         self.main_tabs = QTabWidget()
         monitor_tab = QWidget(); mt_l = QVBoxLayout(monitor_tab); mt_l.addWidget(center, 1)
-        runner_tab = QWidget(); rt_l = QVBoxLayout(runner_tab); rt_l.addWidget(runner_box, 1)
+        runner_tab = QWidget(); rt_l = QVBoxLayout(runner_tab)
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.addWidget(runner_box)
+        v_split.addWidget(self.output_log)
+        v_split.setStretchFactor(0, 2)
+        v_split.setStretchFactor(1, 3)
+        rt_l.addWidget(v_split, 1)
         self.main_tabs.addTab(monitor_tab, "Monitor")
         self.main_tabs.addTab(runner_tab, "Runner")
         layout.addWidget(self.main_tabs, 1)
@@ -353,12 +388,118 @@ class MonitorPage(QWidget):
         self.env_del.clicked.connect(lambda: self._del_selected(self.env_table))
         # Run click is wired in MainWindow to ensure lifecycle
         # refresh handling bound in MainWindow to ensure lifecycle
+        self.script_browse.clicked.connect(self._on_browse_script)
+        self.clear_log_btn.clicked.connect(self.output_log.clear)
+        # Preset buttons are wired in MainWindow for lifecycle
 
     def _on_refresh_conda(self) -> None:
         # Delegate to MainWindow to trigger detection
         p = self.parent()
         if p and hasattr(p, "_detect_remote_conda_envs"):
             p._detect_remote_conda_envs()
+
+    def _on_browse_script(self) -> None:
+        # Ask MainWindow to open remote file dialog, since it holds SSH params
+        p = self.parent()
+        if p and hasattr(p, "_browse_remote_script"):
+            getattr(p, "_browse_remote_script")()
+
+
+class RemoteFileDialog(QDialog):
+    def __init__(self, host_params: Dict[str, Any], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Browse Remote Files")
+        self.resize(700, 520)
+        self._hp = host_params
+        self._cwd = ""
+        self._selected: Optional[str] = None
+
+        v = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.path_edit = QLineEdit(); self.path_edit.setReadOnly(True)
+        self.up_btn = QPushButton("Up")
+        self.home_btn = QPushButton("Home")
+        top.addWidget(QLabel("Path")); top.addWidget(self.path_edit, 1); top.addWidget(self.up_btn); top.addWidget(self.home_btn)
+        v.addLayout(top)
+
+        self.list = QListWidget(); v.addWidget(self.list, 1)
+        btns = QHBoxLayout(); btns.addStretch(1)
+        self.sel_btn = QPushButton("Select"); self.cancel_btn = QPushButton("Cancel")
+        btns.addWidget(self.sel_btn); btns.addWidget(self.cancel_btn)
+        v.addLayout(btns)
+
+        self.up_btn.clicked.connect(self._go_up)
+        self.home_btn.clicked.connect(lambda: self._list_dir(""))
+        self.sel_btn.clicked.connect(self._select_current)
+        self.cancel_btn.clicked.connect(self.reject)
+        self.list.itemDoubleClicked.connect(self._on_double)
+
+        self._list_dir("")
+
+    def selected_path(self) -> str:
+        return self._selected or ""
+
+    def _go_up(self) -> None:
+        p = (self._cwd or "/").rstrip("/")
+        if not p:
+            return
+        parent = p.rsplit("/", 1)[0]
+        if not parent:
+            parent = "/"
+        self._list_dir(parent)
+
+    def _on_double(self, item: QListWidgetItem) -> None:
+        t = item.data(Qt.ItemDataRole.UserRole)
+        name = item.text()
+        if t == 'D':
+            path = (self._cwd.rstrip("/") + "/" + name) if self._cwd else name
+            self._list_dir(path)
+        elif t == 'F':
+            # Accept only .py files
+            if name.lower().endswith('.py'):
+                self._selected = (self._cwd.rstrip("/") + "/" + name) if self._cwd else name
+                self.accept()
+
+    def _select_current(self) -> None:
+        it = self.list.currentItem()
+        if not it:
+            return
+        t = it.data(Qt.ItemDataRole.UserRole)
+        name = it.text()
+        if t == 'D':
+            self._on_double(it)
+        else:
+            if name.lower().endswith('.py'):
+                self._selected = (self._cwd.rstrip("/") + "/" + name) if self._cwd else name
+                self.accept()
+
+    def _list_dir(self, path: str) -> None:
+        try:
+            job = RemoteListDirJob(self._hp["host"], int(self._hp["port"]), self._hp.get("username"), self._hp.get("identity"), self._hp.get("password"), path)
+        except Exception:
+            return
+        def _res(cwd: str, entries: list) -> None:
+            self._cwd = cwd
+            self.path_edit.setText(cwd)
+            self.list.clear()
+            # Show dirs first then files
+            for t in ('D','F','O'):
+                for e in entries:
+                    if e.get('type') != t:
+                        continue
+                    name = str(e.get('name',''))
+                    # Only show .py files; always show directories for navigation
+                    if t == 'F' and not name.lower().endswith('.py'):
+                        continue
+                    it = QListWidgetItem(name)
+                    it.setData(Qt.ItemDataRole.UserRole, t)
+                    self.list.addItem(it)
+        def _err(m: str) -> None:
+            QMessageBox.warning(self, "Remote browse", m or "list failed")
+        job.result.connect(_res)
+        job.error.connect(_err)
+        job.setParent(self)
+        job.start()
 
     def _add_row(self, table: QTableWidget) -> None:
         row = table.rowCount()
@@ -543,9 +684,21 @@ class MainWindow(QMainWindow):
         self.monitor_page.mode_tabs.currentChanged.connect(lambda _=None: self._load_runner_config())
         # Refresh envs: pass from_click=True to control UI feedback
         self.monitor_page.conda_refresh.clicked.connect(lambda: self._detect_remote_conda_envs(True))
+        # Preset actions
+        try:
+            self.monitor_page.preset_save.clicked.connect(self._save_preset)
+            self.monitor_page.preset_load.clicked.connect(self._load_preset_into_ui)
+            self.monitor_page.preset_del.clicked.connect(self._delete_preset)
+        except Exception:
+            pass
 
         # Load profiles
         self._refresh_profiles()
+        # Load preset names once
+        try:
+            self._refresh_presets()
+        except Exception:
+            pass
         last_key = self._config.get("last_used_key")
         # Reflect auto-connect toggle state on UI
         if hasattr(self.login_page, 'auto_connect_cb'):
@@ -661,7 +814,16 @@ class MainWindow(QMainWindow):
 
     # Slots from worker
     def _on_snapshot(self, snap: Snapshot) -> None:
-        self.monitor_page.update_snapshot(snap)
+        try:
+            if hasattr(self.monitor_page, 'update_snapshot'):
+                self.monitor_page.update_snapshot(snap)
+            else:
+                self._update_snapshot_fallback(snap)
+        except Exception as e:
+            try:
+                self._log_debug(f"[ui:error] update_snapshot failed: {e}")
+            except Exception:
+                pass
         self.status.showMessage(
             f"Last update: {time.strftime('%H:%M:%S')} | GPUs: {len(snap.gpus)} | users: {len(snap.user_vram_mib)}"
         )
@@ -680,6 +842,55 @@ class MainWindow(QMainWindow):
         if self.stack.currentIndex() == 1:
             self.stack.setCurrentIndex(0)
             self.status.showMessage("Disconnected")
+
+    # Fallback UI update if MonitorPage lacks update_snapshot (defensive)
+    def _update_snapshot_fallback(self, snap: Snapshot) -> None:
+        mp = self.monitor_page
+        # Table update
+        rows = len(snap.gpus)
+        mp.gpu_table.setRowCount(rows)
+        procs_per_uuid = {}
+        for app in snap.apps:
+            procs_per_uuid[app.gpu_uuid] = procs_per_uuid.get(app.gpu_uuid, 0) + 1
+        for r, g in enumerate(snap.gpus):
+            idx_item = QTableWidgetItem(str(g.index))
+            idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            mp.gpu_table.setItem(r, 0, idx_item)
+            name_item = QTableWidgetItem(g.name)
+            mp.gpu_table.setItem(r, 1, name_item)
+            util_item = QTableWidgetItem(f"{g.util_percent}%")
+            util_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            mp.gpu_table.setItem(r, 2, util_item)
+            prog = QProgressBar()
+            prog.setRange(0, max(1, g.mem_total_mib))
+            prog.setValue(g.mem_used_mib)
+            prog.setFormat(f"{g.mem_used_mib} / {g.mem_total_mib} MiB")
+            mp.gpu_table.setCellWidget(r, 3, prog)
+            n_procs = procs_per_uuid.get(g.uuid, 0)
+            procs_item = QTableWidgetItem(str(n_procs))
+            procs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            mp.gpu_table.setItem(r, 4, procs_item)
+        # Pie
+        base_total = sum(max(0, g.mem_total_mib) for g in snap.gpus)
+        used_total = sum(max(0, g.mem_used_mib) for g in snap.gpus)
+        user_totals = dict(snap.user_vram_mib)
+        used_by_users = sum(max(0, v) for v in user_totals.values())
+        system_other = max(0.0, float(used_total) - float(used_by_users))
+        free_rest = max(0.0, float(base_total) - float(used_total))
+        series = QPieSeries(); series.setLabelsVisible(True)
+        if user_totals:
+            for user, mib in sorted(user_totals.items(), key=lambda kv: kv[1], reverse=True):
+                val = max(0.01, float(mib)); series.append(f"{user} ({int(mib)} MiB)", val)
+        if system_other > 0.5:
+            series.append(f"system/other ({int(system_other)} MiB)", system_other)
+        if base_total <= 0:
+            series.append("idle", 1)
+        elif free_rest > 0.5:
+            series.append(f"free ({int(free_rest)} MiB)", free_rest)
+        chart = QChart(); chart.addSeries(series); chart.setTitle("VRAM Total = users + system + free (MiB)")
+        chart.legend().setVisible(True); chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
+        chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
+        mp.chart_view.setChart(chart)
 
     def _fetch_remote_os_info(self) -> None:
         hp = self._host_params
@@ -716,7 +927,14 @@ class MainWindow(QMainWindow):
 
     # Runner command build/run -------------------------------------------
     def _collect_runner(self) -> Dict[str, Any]:
-        mode = self.monitor_page.get_mode()
+        # Be defensive: get_mode may not exist early during UI construction
+        get_mode = getattr(self.monitor_page, 'get_mode', None)
+        mode = 'train'
+        try:
+            if callable(get_mode):
+                mode = str(get_mode()) or 'train'
+        except Exception:
+            mode = 'train'
         conda_env = self.monitor_page.conda_combo.currentText().strip()
         script = self.monitor_page.script_edit.text().strip()
         # params
@@ -755,12 +973,18 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _update_runner_preview(self) -> None:
-        import shlex as _sh
-        r = self._collect_runner()
-        env_dict = {k: v for k, v in r.get("env", [])}
-        base = self._build_python_cmd(r)
-        inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
-        self.monitor_page.preview_edit.setText(inner)
+        try:
+            r = self._collect_runner()
+            env_dict = {k: v for k, v in r.get("env", [])}
+            base = self._build_python_cmd(r)
+            inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
+            self.monitor_page.preview_edit.setText(inner)
+        except Exception as e:
+            # Don't crash UI if preview build fails transiently
+            try:
+                self._log_debug(f"[ui:error] preview failed: {e}")
+            except Exception:
+                pass
 
     def _run_runner(self) -> None:
         hp = self._host_params
@@ -798,25 +1022,9 @@ class MainWindow(QMainWindow):
         key = self._host_key()
         if not key:
             return
-        mode = self.monitor_page.get_mode()
+        mode = self.monitor_page.get_mode() if hasattr(self.monitor_page, 'get_mode') else 'train'
         r = config_store.load_runner(self._config, key, mode)
-        # populate fields
-        self.monitor_page.conda_combo.setCurrentText(r.get("conda_env", ""))
-        self.monitor_page.script_edit.setText(r.get("script", ""))
-        # params
-        self.monitor_page.params_table.setRowCount(0)
-        for k, v in r.get("params", []):
-            row = self.monitor_page.params_table.rowCount()
-            self.monitor_page.params_table.insertRow(row)
-            self.monitor_page.params_table.setItem(row, 0, QTableWidgetItem(str(k)))
-            self.monitor_page.params_table.setItem(row, 1, QTableWidgetItem(str(v)))
-        # env
-        self.monitor_page.env_table.setRowCount(0)
-        for k, v in r.get("env", []):
-            row = self.monitor_page.env_table.rowCount()
-            self.monitor_page.env_table.insertRow(row)
-            self.monitor_page.env_table.setItem(row, 0, QTableWidgetItem(str(k)))
-            self.monitor_page.env_table.setItem(row, 1, QTableWidgetItem(str(v)))
+        self._apply_runner_fields(r)
 
     def _detect_remote_conda_envs(self, from_click: bool = False) -> None:
         # CondaEnvListJob is imported at module level with robust fallback for script/module runs
@@ -896,6 +1104,78 @@ class MainWindow(QMainWindow):
             pass
         if not envs and hasattr(self.monitor_page, 'output_log'):
             self.monitor_page.output_log.appendPlainText("[conda-detect] No environments detected; type name manually or adjust init path.")
+
+    
+
+    def _apply_runner_fields(self, r: Dict[str, Any]) -> None:
+        # populate fields from runner dict and update preview
+        try:
+            self.monitor_page.conda_combo.setCurrentText(r.get("conda_env", ""))
+            self.monitor_page.script_edit.setText(r.get("script", ""))
+            # params
+            self.monitor_page.params_table.setRowCount(0)
+            for k, v in r.get("params", []):
+                row = self.monitor_page.params_table.rowCount()
+                self.monitor_page.params_table.insertRow(row)
+                self.monitor_page.params_table.setItem(row, 0, QTableWidgetItem(str(k)))
+                self.monitor_page.params_table.setItem(row, 1, QTableWidgetItem(str(v)))
+            # env
+            self.monitor_page.env_table.setRowCount(0)
+            for k, v in r.get("env", []):
+                row = self.monitor_page.env_table.rowCount()
+                self.monitor_page.env_table.insertRow(row)
+                self.monitor_page.env_table.setItem(row, 0, QTableWidgetItem(str(k)))
+                self.monitor_page.env_table.setItem(row, 1, QTableWidgetItem(str(v)))
+            self._update_runner_preview()
+        except Exception:
+            pass
+
+    # Presets --------------------------------------------------------------
+    def _refresh_presets(self) -> None:
+        names = config_store.list_runner_presets(self._config)
+        try:
+            cb = self.monitor_page.preset_combo
+            cur = cb.currentText().strip()
+            cb.blockSignals(True)
+            cb.clear()
+            for n in names:
+                cb.addItem(n)
+            if cur:
+                cb.setEditText(cur)
+            cb.blockSignals(False)
+        except Exception:
+            pass
+
+    def _save_preset(self) -> None:
+        name = self.monitor_page.preset_combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "Preset", "Please input a preset name")
+            return
+        r = self._collect_runner()
+        config_store.save_runner_preset(self._config, name, r)
+        self.status.showMessage(f"Saved preset '{name}'")
+        self._refresh_presets()
+
+    def _load_preset_into_ui(self) -> None:
+        name = self.monitor_page.preset_combo.currentText().strip()
+        if not name:
+            return
+        r = config_store.load_runner_preset(self._config, name)
+        if not r:
+            QMessageBox.warning(self, "Preset", f"Preset '{name}' not found")
+            return
+        self._apply_runner_fields(r)
+        self.status.showMessage(f"Loaded preset '{name}' into UI", 4000)
+
+    def _delete_preset(self) -> None:
+        name = self.monitor_page.preset_combo.currentText().strip()
+        if not name:
+            return
+        resp = QMessageBox.question(self, "Delete preset", f"Delete preset '{name}'?")
+        if resp == QMessageBox.StandardButton.Yes:
+            config_store.delete_runner_preset(self._config, name)
+            self._refresh_presets()
+            self.status.showMessage(f"Deleted preset '{name}'", 4000)
 
 
 def main() -> None:
