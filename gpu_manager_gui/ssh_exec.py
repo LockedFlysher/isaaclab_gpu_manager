@@ -7,10 +7,41 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
-def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_cmd: str) -> str:
+def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_cmd: str, docker_container: Optional[str] = None) -> str:
     # Build environment prefix (KEY=VAL ...) with proper quoting
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items()) if env else ""
     cmd = base_cmd
+    # If docker is selected, wrap with docker exec; conda settings are ignored in this case
+    if docker_container:
+        # Robust python fallback inside container: try python, then python3, then conda run
+        # Keep the original python invocation as PY_CALL, and replace leading 'python ' with the detected interpreter.
+        import shlex as _sh
+        py_call_q = _sh.quote(cmd)
+        env_prefix_q = _sh.quote(exports) if exports else ""
+        # Prefer user-chosen conda env inside container if given, else try 'base'
+        conda_name = (conda_env or "base")
+        inner_script = (
+            "PY_CALL=" + py_call_q + "; "
+            "ENV_PREFIX=" + (env_prefix_q or "\"\"") + "; "
+            # Try python variants first
+            "ok=0; for PY in python python3 /usr/bin/python3 /usr/local/bin/python3; do "
+            "  if command -v \"$PY\" >/dev/null 2>&1; then "
+            "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /$PY }\"; "
+            "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX $CMD\"; else eval \"$CMD\"; fi; ok=1; break; "
+            "  fi; "
+            "done; "
+            # Try conda run inside the container
+            "if [ \"$ok\" -eq 0 ]; then "
+            "  (source ~/.bashrc >/dev/null 2>&1 || true); "
+            "  for p in ~/miniconda3/etc/profile.d/conda.sh ~/anaconda3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" >/dev/null 2>&1 && break; done; "
+            "  if command -v conda >/dev/null 2>&1; then "
+            "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /python }\"; "
+            "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; else eval \"conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; fi; ok=1; "
+            "  fi; "
+            "fi; "
+            "if [ \"$ok\" -eq 0 ]; then echo '[docker-run] python not found in container' 1>&2; exit 127; fi"
+        )
+        return f"docker exec -i {_sh.quote(docker_container)} bash -lc {_sh.quote(inner_script)}"
     if conda_env:
         # Prefer conda run; fallback to activation via conda.sh
         run = f"conda run -n {shlex.quote(conda_env)} --no-capture-output {cmd}"
@@ -52,8 +83,8 @@ class SSHCommandJob(QThread):
         self._timeout = float(timeout or 0.0)
 
     @staticmethod
-    def build_inner(env: Dict[str, str], conda_env: Optional[str], base_cmd: str) -> str:
-        return _compose_inner_command(env, conda_env, base_cmd)
+    def build_inner(env: Dict[str, str], conda_env: Optional[str], base_cmd: str, docker_container: Optional[str] = None) -> str:
+        return _compose_inner_command(env, conda_env, base_cmd, docker_container)
 
     def run(self) -> None:  # type: ignore[override]
         if self._password:
@@ -365,7 +396,106 @@ class RemoteOSInfoJob(QThread):
                 self.error.emit((p.stderr or "os info command failed").strip())
         except Exception as e:  # noqa: BLE001
             self.error.emit(str(e))
+            
+class DockerContainerListJob(QThread):
+    result = pyqtSignal(list)
+    error = pyqtSignal(str)
+    debug = pyqtSignal(str)
 
+    def __init__(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str]) -> None:
+        super().__init__()
+        self._host = host
+        self._port = int(port)
+        self._user = username
+        self._identity = identity
+        self._password = password
+
+    def _run_remote(self, inner: str) -> Tuple[int, str, str]:
+        dest = f"{self._user}@{self._host}" if self._user else self._host
+        cmd = ["ssh", "-p", str(self._port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+        if self._identity:
+            cmd += ["-i", self._identity]
+        cmd += [dest, "--", "bash", "-lc", inner]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return p.returncode, p.stdout, p.stderr
+        except Exception as e:  # noqa: BLE001
+            return 1, "", str(e)
+
+    def run(self) -> None:  # type: ignore[override]
+        script = (
+            "echo '[docker-detect] start' 1>&2; "
+            "echo '[docker-detect] whoami='$(whoami)' shell='$SHELL 1>&2; "
+            # Source rc files to pick up rootless DOCKER_HOST and PATH
+            "if [ -f $HOME/.bashrc ]; then . $HOME/.bashrc >/dev/null 2>&1; fi; "
+            "if [ -f $HOME/.bash_profile ]; then . $HOME/.bash_profile >/dev/null 2>&1; fi; "
+            "if [ -f $HOME/.profile ]; then . $HOME/.profile >/dev/null 2>&1; fi; "
+            "export PATH=\"$PATH:/usr/bin:/usr/local/bin\"; echo '[docker-detect] PATH='$PATH 1>&2; "
+            # Rootless docker socket fallback
+            "if [ -z \"$DOCKER_HOST\" ] && [ -n \"$XDG_RUNTIME_DIR\" ] && [ -S \"$XDG_RUNTIME_DIR/docker.sock\" ]; then export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; fi; "
+            "echo '[docker-detect] DOCKER_HOST='${DOCKER_HOST:-'(default)'} 1>&2; "
+            "DOCKERCMD=$(command -v docker 2>/dev/null || true); if [ -z \"$DOCKERCMD\" ] && [ -x /usr/bin/docker ]; then DOCKERCMD=/usr/bin/docker; fi; "
+            # names + ids to be safe; prefer names; try both direct and sudo (no password) and merge; also try -a
+            "OUT1=\"\"; OUT2=\"\"; OUT3=\"\"; OUT4=\"\"; "
+            "if [ -n \"$DOCKERCMD\" ]; then OUT1=\"$($DOCKERCMD ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; OUT3=\"$($DOCKERCMD ps -a --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; fi; "
+            "OUT2=\"$(sudo -n docker ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; OUT4=\"$(sudo -n docker ps -a --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; "
+            "printf '%s\n%s\n%s\n%s\n' \"$OUT1\" \"$OUT2\" \"$OUT3\" \"$OUT4\" | awk 'NF' | sort -u"
+        )
+        if self._password:
+            try:
+                import paramiko  # type: ignore
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=self._host, port=self._port, username=self._user, password=self._password,
+                    key_filename=self._identity, timeout=10.0, banner_timeout=15.0, auth_timeout=15.0,
+                    allow_agent=True, look_for_keys=True,
+                )
+                cmd = f"bash -lc {shlex.quote(script)}"
+                _, stdout, stderr = client.exec_command(cmd, timeout=12)
+                out = stdout.read().decode(errors="ignore")
+                err = stderr.read().decode(errors="ignore")
+                client.close()
+                if err:
+                    self.debug.emit(err)
+                if out:
+                    self.debug.emit(out)
+            except Exception as e:  # noqa: BLE001
+                self.error.emit(str(e))
+                self.result.emit([])
+                return
+        else:
+            rc, out, err = self._run_remote(script)
+            if rc != 0 and err:
+                self.debug.emit(err)
+            if out:
+                self.debug.emit(out)
+        # Parse out -> list of names (prefer names, fallback to ids)
+        names = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            name = parts[0].strip() if parts else line
+            if name:
+                names.append(name)
+        if not names:
+            # Also try plain `docker ps --format {{.Names}}` (no tab/ID) as a fallback
+            more = []
+            try:
+                rc2, out2, err2 = self._run_remote("docker ps --format '{{.Names}}' 2>/dev/null || true")
+                if out2:
+                    self.debug.emit(out2)
+                    for ln in out2.splitlines():
+                        ln = ln.strip();
+                        if ln:
+                            more.append(ln)
+            except Exception:
+                pass
+            if more:
+                names = sorted(set(more))
+        self.result.emit(names)
 class RemoteListDirJob(QThread):
     """List a remote directory via SSH and emit (cwd, entries) where entries is a list of dicts.
 

@@ -136,6 +136,8 @@ def load_runner(cfg: Dict[str, Any], key: str, mode: str) -> Dict[str, Any]:
     r.setdefault("script", "")
     r.setdefault("params", [])  # list of [key, value]
     r.setdefault("env", [])     # list of [key, value]
+    r.setdefault("use_docker", False)
+    r.setdefault("docker_container", "")
     return r
 
 
@@ -145,6 +147,8 @@ def save_runner(cfg: Dict[str, Any], key: str, mode: str, runner: Dict[str, Any]
         "script": runner.get("script", ""),
         "params": runner.get("params", []),
         "env": runner.get("env", []),
+        "use_docker": bool(runner.get("use_docker", False)),
+        "docker_container": runner.get("docker_container", ""),
     }
     save_config(cfg)
 
@@ -165,6 +169,8 @@ def load_runner_preset(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
     p.setdefault("script", "")
     p.setdefault("params", [])
     p.setdefault("env", [])
+    p.setdefault("use_docker", False)
+    p.setdefault("docker_container", "")
     return p
 
 
@@ -176,6 +182,8 @@ def save_runner_preset(cfg: Dict[str, Any], name: str, runner: Dict[str, Any]) -
         "script": runner.get("script", ""),
         "params": runner.get("params", []),
         "env": runner.get("env", []),
+        "use_docker": bool(runner.get("use_docker", False)),
+        "docker_container": runner.get("docker_container", ""),
     }
     save_config(cfg)
 

@@ -274,9 +274,15 @@ class TopTabs(QWidget):
 
 class MonitorPage(QWidget):
     disconnect_requested = pyqtSignal()
+    # Signals to bubble actions to MainWindow (works even if parent chain changes)
+    docker_refresh_req = pyqtSignal()
+    conda_refresh_req = pyqtSignal()
+    preview_update_req = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
+        # Back-reference to MainWindow (set by MainWindow after construction)
+        self._mw = None
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.os_label = QLabel("")
@@ -339,7 +345,7 @@ class MonitorPage(QWidget):
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
         self.script_browse = QPushButton("Browse")
         self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_combo.setMinimumWidth(220)
-        self.conda_refresh = QPushButton("Refresh envs")
+        self.conda_refresh = QPushButton("Refresh")
         top_form = QGridLayout(); top_form.setHorizontalSpacing(12); top_form.setVerticalSpacing(6)
         # Row 0: Presets (moved to the very top as requested)
         self.preset_combo = QComboBox(); self.preset_combo.setEditable(True); self.preset_combo.setMinimumWidth(180)
@@ -355,9 +361,15 @@ class MonitorPage(QWidget):
         srow = QHBoxLayout(); srow.addWidget(self.script_edit, 1); srow.addWidget(self.script_browse)
         srow_w = QWidget(); srow_w.setLayout(srow)
         top_form.addWidget(srow_w, 1, 1)
-        # Row 2: Conda Env
-        top_form.addWidget(QLabel("Conda Env"), 2, 0)
-        crow = QHBoxLayout(); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
+        # Row 2: Conda / Docker
+        top_form.addWidget(QLabel("Conda / Docker"), 2, 0)
+        self.use_docker_cb = QCheckBox("Docker")
+        self.docker_combo = QComboBox(); self.docker_combo.setEditable(False); self.docker_combo.setMinimumWidth(220)
+        self.docker_refresh = QPushButton("Refresh containers")
+        crow = QHBoxLayout();
+        crow.addWidget(QLabel("Conda")); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
+        crow.addSpacing(12)
+        crow.addWidget(self.use_docker_cb); crow.addWidget(self.docker_combo, 1); crow.addWidget(self.docker_refresh)
         crow_w = QWidget(); crow_w.setLayout(crow)
         top_form.addWidget(crow_w, 2, 1)
         top_form.setColumnStretch(1, 1)
@@ -455,13 +467,44 @@ class MonitorPage(QWidget):
             self._toggle_log(False)
         except Exception:
             pass
+        # Docker toggle wiring
+        self.use_docker_cb.toggled.connect(self._on_docker_toggle)
+        self.docker_combo.currentTextChanged.connect(lambda _=None: self.preview_update_req.emit())
+        self.conda_combo.currentTextChanged.connect(lambda _=None: self.preview_update_req.emit())
+        self.conda_refresh.clicked.connect(self._on_refresh_conda)
+        # Hide legacy docker-only refresh; unified by single Refresh button
+        try:
+            self.docker_refresh.hide()
+        except Exception:
+            pass
         # Preset buttons are wired in MainWindow for lifecycle
 
     def _on_refresh_conda(self) -> None:
         # Delegate to MainWindow to trigger detection
-        p = self.parent()
-        if p and hasattr(p, "_detect_remote_conda_envs"):
-            p._detect_remote_conda_envs()
+        try:
+            use_docker = bool(self.use_docker_cb.isChecked())
+        except Exception:
+            use_docker = False
+        try:
+            sys.stdout.write(f"[ui] refresh (from MonitorPage) mode={'docker' if use_docker else 'conda'}\n"); sys.stdout.flush()
+        except Exception:
+            pass
+        # Prefer direct call to MainWindow if available to avoid signal wiring issues
+        if getattr(self, '_mw', None) is not None:
+            try:
+                if use_docker and hasattr(self._mw, '_detect_remote_docker_containers'):
+                    self._mw._detect_remote_docker_containers(True)
+                    return
+                if (not use_docker) and hasattr(self._mw, '_detect_remote_conda_envs'):
+                    self._mw._detect_remote_conda_envs(True)
+                    return
+            except Exception:
+                pass
+        # Fallback to signals
+        if use_docker:
+            self.docker_refresh_req.emit()
+        else:
+            self.conda_refresh_req.emit()
 
     def _on_browse_script(self) -> None:
         # Ask MainWindow to open remote file dialog, since it holds SSH params
@@ -490,6 +533,49 @@ class MonitorPage(QWidget):
                 self.output_log.setVisible(False)
         except Exception:
             pass
+
+    def _on_docker_toggle(self, checked: bool) -> None:
+        # Enable/disable conda widgets when docker is selected
+        try:
+            self.conda_combo.setEnabled(not checked)
+            # Keep unified Refresh button enabled in both modes
+            self.conda_refresh.setEnabled(True)
+            self.docker_combo.setEnabled(checked)
+            # Legacy docker_refresh hidden in unified mode; ignore enable
+        except Exception:
+            pass
+        # Auto refresh container list when toggled on
+        try:
+            if checked:
+                try:
+                    sys.stdout.write("[ui] docker toggled on\n"); sys.stdout.flush()
+                except Exception:
+                    pass
+                # emit signal to MainWindow
+                self.docker_refresh_req.emit()
+        except Exception:
+            pass
+        # ask MainWindow to rebuild preview
+        self.preview_update_req.emit()
+
+    def _on_refresh_docker(self) -> None:
+        try:
+            sys.stdout.write("[ui] Docker refresh button clicked\n"); sys.stdout.flush()
+        except Exception:
+            pass
+        # Prefer direct call to MainWindow if available
+        if getattr(self, '_mw', None) is not None and hasattr(self._mw, '_detect_remote_docker_containers'):
+            try:
+                self._mw._detect_remote_docker_containers(True)
+                return
+            except Exception:
+                pass
+        # Fallback: Emit signal; MainWindow will handle
+        self.docker_refresh_req.emit()
+
+    def _notify_parent_update_preview(self) -> None:
+        # Backward-compat helper; now just emit signal
+        self.preview_update_req.emit()
 
     # Keep first column at 1/3 width, second at 2/3
     def _apply_column_ratio(self, table: QTableWidget, r_first: float = 1.0/3.0) -> None:
@@ -860,6 +946,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.login_page = LoginPage()
         self.monitor_page = MonitorPage()
+        # Set back-reference so MonitorPage can call into MainWindow reliably
+        try:
+            self.monitor_page._mw = self
+        except Exception:
+            pass
         self.stack.addWidget(self.login_page)
         # Show top-level tabs (Monitor/Runner) as the connected page
         self.stack.addWidget(self.monitor_page.main_tabs)
@@ -873,16 +964,29 @@ class MainWindow(QMainWindow):
         self.login_page.connect_requested.connect(self._begin_connect)
         self.login_page.test_requested.connect(self._test_connect)
         self.monitor_page.disconnect_requested.connect(self._disconnect)
+        # MonitorPage signals (robust across parent changes)
+        try:
+            self.monitor_page.docker_refresh_req.connect(lambda: self._detect_remote_docker_containers(True))
+            self.monitor_page.conda_refresh_req.connect(lambda: self._detect_remote_conda_envs(True))
+            self.monitor_page.preview_update_req.connect(self._update_runner_preview)
+        except Exception:
+            pass
         self.login_page.profile_combo.currentTextChanged.connect(self._load_profile_into_fields)
         # Runner actions
         self.monitor_page.run_btn.clicked.connect(self._run_runner)
         self.monitor_page.conda_combo.currentTextChanged.connect(lambda _=None: self._update_runner_preview())
+        try:
+            self.monitor_page.docker_combo.currentTextChanged.connect(lambda _=None: self._update_runner_preview())
+            self.monitor_page.use_docker_cb.toggled.connect(lambda _=None: self._update_runner_preview())
+        except Exception:
+            pass
         self.monitor_page.script_edit.textChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.params_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.env_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         # Mode tabs removed; no mode change signal
-        # Refresh envs: pass from_click=True to control UI feedback
-        self.monitor_page.conda_refresh.clicked.connect(lambda: self._detect_remote_conda_envs(True))
+        # Refresh tooling: conda or docker depending on toggle
+        self.monitor_page.conda_refresh.clicked.connect(lambda: self._refresh_runner_envs(True))
+        # unified Refresh handles docker/conda; no separate docker_refresh click binding
         # Preset actions
         try:
             self.monitor_page.preset_save.clicked.connect(self._save_preset)
@@ -974,6 +1078,10 @@ class MainWindow(QMainWindow):
         # Load runner config & detect conda envs
         self._load_runner_config()
         self._detect_remote_conda_envs(False)
+        try:
+            self._detect_remote_docker_containers(False)
+        except Exception:
+            pass
         self._fetch_remote_os_info()
 
     def _test_connect(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str], interval: float) -> None:
@@ -1124,11 +1232,28 @@ class MainWindow(QMainWindow):
         job.finished.connect(lambda: self._bg_jobs.remove(job) if job in self._bg_jobs else None)
         job.start()
 
+    # Unified refresh for conda/docker ------------------------------------
+    def _refresh_runner_envs(self, from_click: bool = False) -> None:
+        try:
+            use_docker = bool(getattr(self.monitor_page, 'use_docker_cb', None) and self.monitor_page.use_docker_cb.isChecked())
+        except Exception:
+            use_docker = False
+        try:
+            sys.stdout.write(f"[ui] refresh mode={'docker' if use_docker else 'conda'}\n"); sys.stdout.flush()
+        except Exception:
+            pass
+        if use_docker:
+            self._detect_remote_docker_containers(from_click)
+        else:
+            self._detect_remote_conda_envs(from_click)
+
     # Runner command build/run -------------------------------------------
     def _collect_runner(self) -> Dict[str, Any]:
         # Single-mode runner
         mode = 'default'
         conda_env = self.monitor_page.conda_combo.currentText().strip()
+        use_docker = bool(self.monitor_page.use_docker_cb.isChecked())
+        docker_container = self.monitor_page.docker_combo.currentText().strip()
         script = self.monitor_page.script_edit.text().strip()
         # params
         params = []
@@ -1148,7 +1273,7 @@ class MainWindow(QMainWindow):
             v = (v_item.text() if v_item else "").strip()
             if k:
                 env.append([k, v])
-        return {"mode": mode, "conda_env": conda_env, "script": script, "params": params, "env": env}
+        return {"mode": mode, "conda_env": conda_env, "use_docker": use_docker, "docker_container": docker_container, "script": script, "params": params, "env": env}
 
     def _build_python_cmd(self, runner: Dict[str, Any]) -> str:
         script = runner.get("script") or ""
@@ -1170,7 +1295,13 @@ class MainWindow(QMainWindow):
             r = self._collect_runner()
             env_dict = {k: v for k, v in r.get("env", [])}
             base = self._build_python_cmd(r)
-            inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
+            use_docker = bool(r.get("use_docker"))
+            docker_container = (r.get("docker_container") or "").strip() if use_docker else None
+            if use_docker and not docker_container:
+                # Show a helpful placeholder to indicate docker mode is active
+                inner = f"docker exec -i <container> bash -lc {shlex.quote(base)}"
+            else:
+                inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None if not docker_container else None), base_cmd=base, docker_container=docker_container)
             self.monitor_page.preview_edit.setText(inner)
         except Exception as e:
             # Don't crash UI if preview build fails transiently
@@ -1245,12 +1376,20 @@ class MainWindow(QMainWindow):
         if from_click:
             try:
                 self.monitor_page.conda_refresh.setEnabled(False)
+                try:
+                    self.monitor_page.conda_refresh.setText("Refreshing…")
+                except Exception:
+                    pass
             except Exception:
                 pass
             self.status.showMessage("Refreshing remote conda environments…")
             try:
                 sys.stdout.write("[ui] Refresh envs clicked; host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
                 sys.stdout.flush()
+            except Exception:
+                pass
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
             except Exception:
                 pass
         job = CondaEnvListJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
@@ -1266,7 +1405,17 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
         job.error.connect(_on_error)
-        job.debug.connect(lambda m: self.monitor_page.output_log.appendPlainText(m.rstrip("\n")))
+        def _dbg2(m: str) -> None:
+            m = m.rstrip("\n")
+            try:
+                self.monitor_page.output_log.appendPlainText(m)
+            except Exception:
+                pass
+            try:
+                sys.stdout.write(m + "\n"); sys.stdout.flush()
+            except Exception:
+                pass
+        job.debug.connect(_dbg2)
         job.setParent(self)
         self._bg_jobs.append(job)
         def _finished_cleanup() -> None:
@@ -1275,6 +1424,14 @@ class MainWindow(QMainWindow):
             if from_click:
                 try:
                     self.monitor_page.conda_refresh.setEnabled(True)
+                    try:
+                        self.monitor_page.conda_refresh.setText("Refresh envs")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    QApplication.restoreOverrideCursor()
                 except Exception:
                     pass
         job.finished.connect(_finished_cleanup)
@@ -1295,8 +1452,113 @@ class MainWindow(QMainWindow):
             self.monitor_page.conda_refresh.setEnabled(True)
         except Exception:
             pass
+        # Print to terminal for visibility
+        try:
+            sys.stdout.write("[conda-detect] envs: %s\n" % (", ".join(envs) if envs else "<none>")); sys.stdout.flush()
+        except Exception:
+            pass
         if not envs and hasattr(self.monitor_page, 'output_log'):
             self.monitor_page.output_log.appendPlainText("[conda-detect] No environments detected; type name manually or adjust init path.")
+
+    def _detect_remote_docker_containers(self, from_click: bool = False) -> None:
+        hp = self._host_params
+        # Trace entry as early as possible
+        try:
+            sys.stdout.write(f"[docker-detect] enter from_click={from_click} hp_present={bool(hp)}\n"); sys.stdout.flush()
+        except Exception:
+            pass
+        # Robust import with absolute fallback and visible error
+        try:
+            from .ssh_exec import DockerContainerListJob
+        except Exception as e1:
+            try:
+                from gpu_manager_gui.ssh_exec import DockerContainerListJob  # type: ignore
+            except Exception as e2:
+                try:
+                    sys.stdout.write(f"[docker-detect] import failed: {e1 or e2}\n"); sys.stdout.flush()
+                except Exception:
+                    pass
+                return
+        if not hp:
+            if from_click:
+                try:
+                    self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot list containers")
+                except Exception:
+                    pass
+            return
+        if from_click:
+            try:
+                self.monitor_page.output_log.appendPlainText("[ui] Refresh containers clicked at %s" % time.strftime('%H:%M:%S'))
+                # Also print to terminal so user sees it without opening the log panel
+                sys.stdout.write("[ui] Refresh containers clicked; host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
+                sys.stdout.flush()
+            except Exception:
+                pass
+            try:
+                # Use unified refresh button for visual feedback
+                self.monitor_page.conda_refresh.setEnabled(False)
+                try:
+                    self.monitor_page.conda_refresh.setText("Refreshing…")
+                except Exception:
+                    pass
+                QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+            except Exception:
+                pass
+        try:
+            self.status.showMessage("Refreshing remote docker containers…")
+        except Exception:
+            pass
+        job = DockerContainerListJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
+        def _on_res(names: list) -> None:
+            try:
+                self.monitor_page.docker_combo.clear()
+                self.monitor_page.docker_combo.addItems(names or [])
+                self.status.showMessage(f"Docker containers detected: {len(names)}", 5000)
+                # Print to terminal for visibility
+                sys.stdout.write("[docker-detect] containers: %s\n" % (", ".join(names) if names else "<none>"))
+                sys.stdout.flush()
+            except Exception:
+                pass
+        def _on_err(m: str) -> None:
+            try:
+                self.monitor_page.output_log.appendPlainText(("[docker-detect:error] " + (m or "")).rstrip("\n"))
+                sys.stdout.write("[docker-detect:error] %s\n" % (m or ""))
+                sys.stdout.flush()
+            except Exception:
+                pass
+        job.result.connect(_on_res)
+        job.error.connect(_on_err)
+        def _dbg(s: str) -> None:
+            s = s.rstrip("\n")
+            try:
+                self.monitor_page.output_log.appendPlainText(s)
+            except Exception:
+                pass
+            try:
+                sys.stdout.write(s + "\n"); sys.stdout.flush()
+            except Exception:
+                pass
+        job.debug.connect(_dbg)
+        job.setParent(self)
+        self._bg_jobs.append(job)
+        def _done() -> None:
+            if job in self._bg_jobs:
+                self._bg_jobs.remove(job)
+            if from_click:
+                try:
+                    self.monitor_page.conda_refresh.setEnabled(True)
+                    try:
+                        self.monitor_page.conda_refresh.setText("Refresh")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
+        job.finished.connect(_done)
+        job.start()
 
     
 
@@ -1304,6 +1566,8 @@ class MainWindow(QMainWindow):
         # populate fields from runner dict and update preview
         try:
             self.monitor_page.conda_combo.setCurrentText(r.get("conda_env", ""))
+            self.monitor_page.use_docker_cb.setChecked(bool(r.get("use_docker", False)))
+            self.monitor_page.docker_combo.setCurrentText(r.get("docker_container", ""))
             self.monitor_page.script_edit.setText(r.get("script", ""))
             # params
             self.monitor_page.params_table.setRowCount(0)
