@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+import threading
+import re
 from typing import Optional, Dict, Any
 import shlex
 import subprocess
@@ -41,13 +43,15 @@ from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidg
 # Support both `python -m gpu_manager_gui.main` and direct script run
 try:
     from .ssh_worker import SSHGpuPoller, Snapshot
-    from .ssh_exec import SSHCommandJob
+    from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob
     from . import config_store
 except Exception:  # running as a script: fix sys.path and import absolutely
     import os as _os, sys as _sys
     _sys.path.append(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from gpu_manager_gui.ssh_worker import SSHGpuPoller, Snapshot
     from gpu_manager_gui.ssh_exec import SSHCommandJob
+    from gpu_manager_gui.ssh_exec import RemoteOSInfoJob
+    from gpu_manager_gui.ssh_exec import CondaEnvListJob
     from gpu_manager_gui import config_store
 
 
@@ -248,7 +252,15 @@ class MonitorPage(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
+        self.os_label = QLabel("")
+        # Allow selecting/copying the OS text on PyQt6
+        try:
+            self.os_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        except Exception:
+            # Fallback if enum not found for some reason
+            self.os_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         self.disconnect_btn = QPushButton("Disconnect")
+        top.addWidget(self.os_label)
         top.addStretch(1)
         top.addWidget(self.disconnect_btn)
         layout.addLayout(top)
@@ -282,7 +294,7 @@ class MonitorPage(QWidget):
 
         # Top row: script (left) and conda env (right)
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
-        self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_refresh = QPushButton("Refresh envs"); self.debug_cb = QCheckBox("Debug")
+        self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_refresh = QPushButton("Refresh envs")
         top_row = QHBoxLayout()
         # Left: script
         top_row.addWidget(QLabel("script"))
@@ -292,7 +304,6 @@ class MonitorPage(QWidget):
         top_row.addWidget(QLabel("conda env"))
         top_row.addWidget(self.conda_combo, 1)
         top_row.addWidget(self.conda_refresh)
-        top_row.addWidget(self.debug_cb)
         r_v.addLayout(top_row)
 
         form_row = QHBoxLayout()
@@ -341,7 +352,7 @@ class MonitorPage(QWidget):
         self.env_add.clicked.connect(lambda: self._add_row(self.env_table))
         self.env_del.clicked.connect(lambda: self._del_selected(self.env_table))
         # Run click is wired in MainWindow to ensure lifecycle
-        self.conda_refresh.clicked.connect(self._on_refresh_conda)
+        # refresh handling bound in MainWindow to ensure lifecycle
 
     def _on_refresh_conda(self) -> None:
         # Delegate to MainWindow to trigger detection
@@ -530,8 +541,8 @@ class MainWindow(QMainWindow):
         self.monitor_page.params_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.env_table.itemChanged.connect(lambda _=None: self._update_runner_preview())
         self.monitor_page.mode_tabs.currentChanged.connect(lambda _=None: self._load_runner_config())
-        self.monitor_page.conda_refresh.clicked.connect(self._detect_remote_conda_envs)
-        self.monitor_page.conda_refresh.clicked.connect(self._detect_remote_conda_envs)
+        # Refresh envs: pass from_click=True to control UI feedback
+        self.monitor_page.conda_refresh.clicked.connect(lambda: self._detect_remote_conda_envs(True))
 
         # Load profiles
         self._refresh_profiles()
@@ -610,7 +621,8 @@ class MainWindow(QMainWindow):
         self.login_page.profile_combo.setCurrentText(config_store.make_key(host, port, user))
         # Load runner config & detect conda envs
         self._load_runner_config()
-        self._detect_remote_conda_envs()
+        self._detect_remote_conda_envs(False)
+        self._fetch_remote_os_info()
 
     def _test_connect(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str], interval: float) -> None:
         self.status.showMessage("Testing SSH connection…")
@@ -661,11 +673,6 @@ class MainWindow(QMainWindow):
             self.status.showMessage(msg, 5000)
 
     def _log_debug(self, text: str) -> None:
-        try:
-            if not self.monitor_page.debug_cb.isChecked():
-                return
-        except Exception:
-            pass
         self.monitor_page.output_log.appendPlainText(text.rstrip("\n"))
 
     def _on_poller_finished(self) -> None:
@@ -673,6 +680,39 @@ class MainWindow(QMainWindow):
         if self.stack.currentIndex() == 1:
             self.stack.setCurrentIndex(0)
             self.status.showMessage("Disconnected")
+
+    def _fetch_remote_os_info(self) -> None:
+        hp = self._host_params
+        # Always log the click into the Runner output so user sees activity
+        try:
+            self.monitor_page.output_log.appendPlainText(
+                "[ui] Refresh envs clicked at %s" % time.strftime('%H:%M:%S')
+            )
+        except Exception:
+            pass
+        if not hp:
+            # Not connected: inform user visibly and return
+            try:
+                self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot refresh envs")
+                self.status.showMessage("Not connected", 5000)
+            except Exception:
+                pass
+            return
+        try:
+            job = RemoteOSInfoJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
+        except Exception:
+            return
+        def _set(text: str) -> None:
+            try:
+                self.monitor_page.os_label.setText(text)
+            except Exception:
+                pass
+        job.result.connect(_set)
+        job.error.connect(lambda m: _set(f"OS: unknown | {m}"))
+        job.setParent(self)
+        self._bg_jobs.append(job)
+        job.finished.connect(lambda: self._bg_jobs.remove(job) if job in self._bg_jobs else None)
+        job.start()
 
     # Runner command build/run -------------------------------------------
     def _collect_runner(self) -> Dict[str, Any]:
@@ -778,34 +818,67 @@ class MainWindow(QMainWindow):
             self.monitor_page.env_table.setItem(row, 0, QTableWidgetItem(str(k)))
             self.monitor_page.env_table.setItem(row, 1, QTableWidgetItem(str(v)))
 
-    def _detect_remote_conda_envs(self) -> None:
-        try:
-            from .ssh_exec import CondaEnvListJob
-        except Exception:
-            return
+    def _detect_remote_conda_envs(self, from_click: bool = False) -> None:
+        # CondaEnvListJob is imported at module level with robust fallback for script/module runs
         hp = self._host_params
+        if from_click:
+            try:
+                self.monitor_page.output_log.appendPlainText(
+                    "[ui] Refresh envs clicked at %s" % time.strftime('%H:%M:%S')
+                )
+                self.monitor_page.output_log.appendPlainText(
+                    "[conda-detect] host=%s user=%s port=%s" % (
+                        hp.get('host'), hp.get('username'), hp.get('port')
+                    )
+                )
+            except Exception:
+                pass
         if not hp:
+            if from_click:
+                try:
+                    self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot refresh envs")
+                    self.status.showMessage("Not connected", 5000)
+                except Exception:
+                    pass
             return
-        # Disable refresh button while running and add status
-        try:
-            self.monitor_page.conda_refresh.setEnabled(False)
-        except Exception:
-            pass
-        self.status.showMessage("Refreshing remote conda environments…")
+        if from_click:
+            try:
+                self.monitor_page.conda_refresh.setEnabled(False)
+            except Exception:
+                pass
+            self.status.showMessage("Refreshing remote conda environments…")
+            try:
+                sys.stdout.write("[ui] Refresh envs clicked; host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
+                sys.stdout.flush()
+            except Exception:
+                pass
         job = CondaEnvListJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
         job.result.connect(self._on_conda_envs)
-        # Mirror errors to output when Debug is checked
-        job.error.connect(lambda m: (self.status.showMessage(m, 5000), self.monitor_page.output_log.appendPlainText(m) if getattr(self.monitor_page, 'debug_cb', None) and self.monitor_page.debug_cb.isChecked() else None))
-        # CondaEnvListJob emits debug logs on stderr; mirror to Output when Debug is checked
-        try:
-            job.debug.connect(lambda m: (self.monitor_page.debug_cb.isChecked() and self.monitor_page.output_log.appendPlainText(m.rstrip("\n"))))
-        except Exception:
-            pass
+        def _on_error(m: str) -> None:
+            try:
+                self.monitor_page.output_log.appendPlainText(("[conda-detect:error] " + (m or "")).rstrip("\n"))
+                self.status.showMessage(m or "conda refresh failed", 5000)
+            finally:
+                if from_click:
+                    try:
+                        self.monitor_page.conda_refresh.setEnabled(True)
+                    except Exception:
+                        pass
+        job.error.connect(_on_error)
+        job.debug.connect(lambda m: self.monitor_page.output_log.appendPlainText(m.rstrip("\n")))
         job.setParent(self)
         self._bg_jobs.append(job)
-        job.finished.connect(lambda: self._bg_jobs.remove(job) if job in self._bg_jobs else None)
+        def _finished_cleanup() -> None:
+            if job in self._bg_jobs:
+                self._bg_jobs.remove(job)
+            if from_click:
+                try:
+                    self.monitor_page.conda_refresh.setEnabled(True)
+                except Exception:
+                    pass
+        job.finished.connect(_finished_cleanup)
         job.start()
-
+    
     def _on_conda_envs(self, envs: list) -> None:
         self.monitor_page.conda_combo.clear()
         self.monitor_page.conda_combo.addItems(envs or [])
@@ -826,6 +899,38 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    # On macOS, suppress noisy system IMK/TSM logs that clutter the terminal.
+    def _install_macos_stderr_filter() -> None:
+        if sys.platform != "darwin":
+            return
+        try:
+            r_fd, w_fd = os.pipe()
+            orig_err = os.dup(2)
+            os.dup2(w_fd, 2)
+            os.close(w_fd)
+            patterns = [
+                "IMKCFRunLoopWakeUpReliable",
+                "AdjustCapsLockLEDForKeyTransitionHandling",
+                "error messaging the mach port",
+            ]
+            rx = re.compile("|".join(re.escape(p) for p in patterns))
+
+            def _reader() -> None:
+                with os.fdopen(r_fd, "r", errors="ignore", buffering=1) as rf, os.fdopen(orig_err, "w", buffering=1) as out:
+                    for line in rf:
+                        if rx.search(line):
+                            # Drop known macOS IMK/TSM noise lines
+                            continue
+                        out.write(line)
+                        out.flush()
+
+            t = threading.Thread(target=_reader, name="stderr-filter", daemon=True)
+            t.start()
+        except Exception:
+            pass
+
+    _install_macos_stderr_filter()
+
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()

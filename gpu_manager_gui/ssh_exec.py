@@ -176,22 +176,32 @@ class CondaEnvListJob(QThread):
     def run(self) -> None:  # type: ignore[override]
         # Build robust detection script: source common conda.sh locations, then try JSON, then text, finally list envs directories
         detect_script = (
+            # Header
             "echo '[conda-detect] start' 1>&2; "
             "echo '[conda-detect] whoami='$(whoami)' shell='$SHELL 1>&2; "
-            "(command -v conda >/dev/null 2>&1 && echo '[conda-detect] conda found in PATH' 1>&2) || "
-            "(echo '[conda-detect] sourcing common conda.sh locations' 1>&2; "
-            " source ~/.bashrc >/dev/null 2>&1 || true; "
-            " for p in \n"
-            "   ~/miniconda3/etc/profile.d/conda.sh \n"
-            "   ~/anaconda3/etc/profile.d/conda.sh \n"
-            "   /opt/conda/etc/profile.d/conda.sh \n"
-            "   ~/mambaforge/etc/profile.d/conda.sh \n"
-            "   ~/micromamba/etc/profile.d/conda.sh \n"
-            " ; do if [ -f \"$p\" ]; then echo \"[conda-detect] source $p\" 1>&2; source \"$p\" >/dev/null 2>&1; break; fi; done; "
-            " eval \"$(conda shell.bash hook 2>/dev/null)\" || true); "
-            "(conda env list --json 2>/dev/null) || (conda info --envs 2>/dev/null) || "
-            "(mamba env list --json 2>/dev/null) || (micromamba env list --json 2>/dev/null) || "
-            "(ls -1d ~/miniconda3/envs/* ~/anaconda3/envs/* /opt/conda/envs/* ~/mambaforge/envs/* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)"
+            # Source common rc files explicitly (bash login shells won't source .bashrc by default)
+            "if [ -f $HOME/.bashrc ]; then echo '[conda-detect] source ~/.bashrc' 1>&2; . $HOME/.bashrc >/dev/null 2>&1; fi; "
+            "if [ -f $HOME/.bash_profile ]; then echo '[conda-detect] source ~/.bash_profile' 1>&2; . $HOME/.bash_profile >/dev/null 2>&1; fi; "
+            "if [ -f $HOME/.profile ]; then echo '[conda-detect] source ~/.profile' 1>&2; . $HOME/.profile >/dev/null 2>&1; fi; "
+            # Ensure PATH contains common conda bin locations (no literal quotes in PATH)
+            "export PATH=\"$HOME/miniconda3/bin:$HOME/anaconda3/bin:$HOME/miniforge3/bin:/opt/conda/bin:$HOME/mambaforge/bin:$HOME/micromamba/bin:$PATH\"; "
+            "echo '[conda-detect] PATH='$PATH 1>&2; "
+            # Try to source conda.sh from common locations
+            "for p in $HOME/miniconda3/etc/profile.d/conda.sh $HOME/anaconda3/etc/profile.d/conda.sh $HOME/miniforge3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh $HOME/mambaforge/etc/profile.d/conda.sh $HOME/micromamba/etc/profile.d/conda.sh; do "
+            "  if [ -f \"$p\" ]; then echo \"[conda-detect] source $p\" 1>&2; . \"$p\" >/dev/null 2>&1; break; fi; done; "
+            # As a fallback, try the appropriate shell hook
+            "if [ \"${SHELL##*/}\" = \"zsh\" ]; then eval \"$(conda shell.zsh hook 2>/dev/null)\" >/dev/null 2>&1 || true; else eval \"$(conda shell.bash hook 2>/dev/null)\" >/dev/null 2>&1 || true; fi; "
+            # Prepare output accumulator and try detection via conda/mamba
+            "ENV_OUT=\"\"; "
+            "CONDACMD=$(command -v conda 2>/dev/null || true); "
+            "if [ -n \"$CONDACMD\" ]; then echo '[conda-detect] conda='$(command -v conda) 1>&2; ENV_OUT=\"$($CONDACMD env list --json 2>/dev/null || $CONDACMD info --envs 2>/dev/null || true)\"; "
+            "else ENV_OUT=\"$(mamba env list --json 2>/dev/null || micromamba env list --json 2>/dev/null || true)\"; fi; "
+            # Try zsh login context if conda is configured only in zsh
+            "if [ -z \"$ENV_OUT\" ] && command -v zsh >/dev/null 2>&1; then ENV_OUT=\"$(zsh -lc 'CONDACMD=$(command -v conda 2>/dev/null || true); if [ -n \"$CONDACMD\" ]; then $CONDACMD env list --json 2>/dev/null || $CONDACMD info --envs 2>/dev/null || true; fi' 2>/dev/null || true)\"; fi; "
+            # Final fallback: only if previous attempts yielded nothing
+            "if [ -z \"$ENV_OUT\" ]; then ENV_OUT=\"$(ls -1d $HOME/miniconda3/envs/* $HOME/anaconda3/envs/* $HOME/miniforge3/envs/* $HOME/.conda/envs/* /opt/conda/envs/* $HOME/mambaforge/envs/* 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u || true)\"; fi; "
+            # Print the accumulated output to stdout (JSON or text)
+            "printf %s \"$ENV_OUT\""
         )
 
         if self._password:
@@ -218,7 +228,13 @@ class CondaEnvListJob(QThread):
                 client.close()
                 if err:
                     self.debug.emit(err)
+                if out:
+                    self.debug.emit(out)
                 envs = self._parse_envs(out)
+                try:
+                    self.debug.emit("[conda-detect] parsed envs: %d -> %s" % (len(envs), ", ".join(envs)))
+                except Exception:
+                    pass
                 self.result.emit(envs)
                 return
             except Exception as e:  # noqa: BLE001
@@ -233,28 +249,38 @@ class CondaEnvListJob(QThread):
         if out:
             self.debug.emit(out)
         envs = self._parse_envs(out)
+        try:
+            self.debug.emit("[conda-detect] parsed envs: %d -> %s" % (len(envs), ", ".join(envs)))
+        except Exception:
+            pass
         self.result.emit(envs)
 
     @staticmethod
     def _parse_envs(out: str) -> List[str]:
-        out = out.strip()
+        out = (out or "").strip()
         if not out:
             return []
-        # Try JSON first
-        if out.startswith("{"):
+        # Try JSON first. Some setups print warnings before JSON; locate the first '{'.
+        try:
+            json_start = out.index("{")
+        except ValueError:
+            json_start = -1
+        if json_start >= 0:
             try:
                 import json
-                data = json.loads(out)
-                # conda env list --json has keys: envs (list of paths)
-                paths = data.get("envs", [])
+                data = json.loads(out[json_start:])
+                # conda env list/info --json typically has key 'envs'; some tools use 'environments'.
+                paths = data.get("envs", []) or data.get("environments", [])
                 names: List[str] = []
                 for p in paths:
                     if not isinstance(p, str):
                         continue
-                    name = p.split("/")[-1] or p
+                    # Normalize both unix/windows path separators
+                    name = p.replace("\\", "/").split("/")[-1] or p
                     names.append(name)
                 return names
             except Exception:
+                # If JSON parse fails, fall back to text parsing below
                 pass
         # Fallback parse conda info --envs text or plain names
         envs: List[str] = []
@@ -269,3 +295,73 @@ class CondaEnvListJob(QThread):
             if len(parts) >= 1:
                 envs.append(parts[0])
         return envs
+
+
+class RemoteOSInfoJob(QThread):
+    """Fetch remote OS info (pretty name, kernel, hostname) via SSH and emit a one-line summary."""
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str]) -> None:
+        super().__init__()
+        self._host = host
+        self._port = int(port)
+        self._user = username
+        self._identity = identity
+        self._password = password
+
+    def run(self) -> None:  # type: ignore[override]
+        script = (
+            "name=\"\"; "
+            "if [ -r /etc/os-release ]; then . /etc/os-release >/dev/null 2>&1; name=\"$PRETTY_NAME\"; fi; "
+            "if [ -z \"$name\" ] && command -v lsb_release >/dev/null 2>&1; then name=\"$(lsb_release -ds 2>/dev/null)\"; fi; "
+            "if [ -z \"$name\" ]; then name=\"$(uname -s)\"; fi; "
+            "kernel=\"$(uname -r 2>/dev/null)\"; host=\"$(hostname 2>/dev/null)\"; "
+            "echo \"$name | kernel $kernel | $host\""
+        )
+        cmd = f"bash -lc {shlex.quote(script)}"
+        if self._password:
+            try:
+                import paramiko  # type: ignore
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=self._host,
+                    port=self._port,
+                    username=self._user,
+                    password=self._password,
+                    key_filename=self._identity,
+                    timeout=10.0,
+                    banner_timeout=15.0,
+                    auth_timeout=15.0,
+                    allow_agent=True,
+                    look_for_keys=True,
+                )
+                _, stdout, stderr = client.exec_command(cmd, timeout=10)
+                out = stdout.read().decode(errors="ignore").strip()
+                err = stderr.read().decode(errors="ignore").strip()
+                client.close()
+                if out:
+                    self.result.emit(out)
+                elif err:
+                    self.error.emit(err)
+                else:
+                    self.error.emit("empty os info output")
+            except Exception as e:  # noqa: BLE001
+                self.error.emit(str(e))
+            return
+
+        dest = f"{self._user}@{self._host}" if self._user else self._host
+        ssh_cmd = ["ssh", "-p", str(self._port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+        if self._identity:
+            ssh_cmd += ["-i", self._identity]
+        ssh_cmd += [dest, "--", cmd]
+        try:
+            p = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=12)
+            out = (p.stdout or "").strip()
+            if out:
+                self.result.emit(out)
+            else:
+                self.error.emit((p.stderr or "os info command failed").strip())
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(str(e))
