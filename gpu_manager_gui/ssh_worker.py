@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from .nvidia_parser import summarize, GpuInfo, ComputeApp
+from .nvidia_parser import summarize, GpuInfo, ComputeApp, parse_pmon
 
 
 @dataclass
@@ -181,6 +181,37 @@ class SSHGpuPoller(QThread):
                 errors.append(err3.strip())
 
         gpus, apps, user_totals = summarize(out_gpus, out_apps, out_ps)
+
+        # Fallback: if no compute-apps, try pmon to estimate per-proc VRAM
+        if not apps:
+            rc4, out_pmon, err4 = self._run_remote("nvidia-smi pmon -c 1 || true")
+            if rc4 != 0 and err4:
+                errors.append(err4.strip())
+            pmon_rows = parse_pmon(out_pmon)
+            if pmon_rows:
+                # Build pid->user and user totals from pmon
+                # Prepare uuid map by index
+                idx_to_uuid = {gi.index: gi.uuid for gi in summarize(out_gpus, "", "")[0]}
+                # Collect pids for ps (again, as pmon may include more pids)
+                pids2 = [str(pid) for (_, pid, _, _) in pmon_rows]
+                out_ps2 = ""
+                if pids2:
+                    pid_arg2 = ",".join(pids2)
+                    rc5, out_ps2, err5 = self._run_remote(f"ps -o pid=,user= -p {pid_arg2}")
+                    if rc5 != 0 and err5:
+                        errors.append(err5.strip())
+                pid_map2 = {}
+                # Merge maps: prefer new mapping, fallback to previous mapping
+                from .nvidia_parser import parse_ps_pid_user
+                pid_map2 = parse_ps_pid_user(out_ps2)
+                # Build ComputeApp list and user totals
+                apps = []
+                user_totals = {}
+                for gpu_idx, pid, proc_name, fb_mib in pmon_rows:
+                    uuid = idx_to_uuid.get(gpu_idx, str(gpu_idx))
+                    apps.append(ComputeApp(gpu_uuid=uuid, pid=pid, process_name=proc_name, used_memory_mib=fb_mib))
+                    user = pid_map2.get(pid, "unknown")
+                    user_totals[user] = user_totals.get(user, 0) + max(0, fb_mib)
         return Snapshot(time.time(), gpus, apps, user_totals, errors)
 
     # QThread --------------------------------------------------------------

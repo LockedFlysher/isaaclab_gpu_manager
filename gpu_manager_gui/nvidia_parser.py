@@ -125,3 +125,54 @@ def summarize(gpu_csv: str, apps_csv: str, ps_text: str) -> Tuple[List[GpuInfo],
     user_totals = aggregate_user_vram(apps, pid_map)
     return gpus, apps, user_totals
 
+
+def parse_pmon(text: str) -> List[Tuple[int, int, str, int]]:
+    """Parses `nvidia-smi pmon -c 1` output.
+
+    Returns a list of tuples (gpu_index, pid, process_name, fb_mib).
+    Will ignore rows with pid '-' or fb unknown.
+    """
+    rows: List[Tuple[int, int, str, int]] = []
+    if not text:
+        return rows
+    # Determine column positions by header line starting with '#'
+    header = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('#'):
+            header = line.lstrip('#').strip().split()
+            continue
+        parts = line.split()
+        if not parts or parts[0] == '#' or parts[1:2] == ['-']:
+            continue
+        try:
+            gpu_idx = int(parts[0])
+        except Exception:
+            continue
+        # Try extract pid
+        try:
+            pid = int(parts[1])
+        except Exception:
+            continue
+
+        # Find fb field index if present
+        fb_mib = 0
+        name = parts[-1] if parts else ""
+        if header and 'fb' in header:
+            try:
+                fb_index = header.index('fb')
+                fb_mib = int(parts[fb_index])
+            except Exception:
+                fb_mib = 0
+        else:
+            # Fallback: try 'mem' column if numeric and assume MiB
+            if header and 'mem' in header:
+                try:
+                    mi = header.index('mem')
+                    fb_mib = int(parts[mi])
+                except Exception:
+                    fb_mib = 0
+        rows.append((gpu_idx, pid, name, max(0, fb_mib)))
+    return rows

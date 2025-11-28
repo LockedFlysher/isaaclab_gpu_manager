@@ -235,17 +235,37 @@ class MonitorPage(QWidget):
             procs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.gpu_table.setItem(r, 4, procs_item)
 
+        # Build pie based on TOTAL VRAM across all GPUs, not just used-by-users
+        base_total = sum(max(0, g.mem_total_mib) for g in snap.gpus)
+        used_total = sum(max(0, g.mem_used_mib) for g in snap.gpus)
+        user_totals = dict(snap.user_vram_mib)
+        used_by_users = sum(max(0, v) for v in user_totals.values())
+
+        # System/other = driver/reserved/video memory not attributed to a user
+        system_other = max(0.0, float(used_total) - float(used_by_users))
+        free_rest = max(0.0, float(base_total) - float(used_total))
+
         series = QPieSeries()
         series.setLabelsVisible(True)
-        totals = snap.user_vram_mib
-        if not totals:
+
+        # Users first (sorted desc)
+        if user_totals:
+            for user, mib in sorted(user_totals.items(), key=lambda kv: kv[1], reverse=True):
+                val = max(0.01, float(mib))
+                series.append(f"{user} ({int(mib)} MiB)", val)
+        # Then system/other (only if non-zero)
+        if system_other > 0.5:
+            series.append(f"system/other ({int(system_other)} MiB)", system_other)
+        # Finally free rest to ensure the whole circle equals total VRAM
+        if base_total <= 0:
+            # No GPUs? show idle placeholder
             series.append("idle", 1)
-        else:
-            for user, mib in sorted(totals.items(), key=lambda kv: kv[1], reverse=True):
-                series.append(f"{user} ({mib} MiB)", max(0.01, float(mib)))
+        elif free_rest > 0.5:
+            series.append(f"free ({int(free_rest)} MiB)", free_rest)
+
         chart = QChart()
         chart.addSeries(series)
-        chart.setTitle("Per-user VRAM (MiB)")
+        chart.setTitle("VRAM Total = users + system + free (MiB)")
         chart.legend().setVisible(True)
         chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
         chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
