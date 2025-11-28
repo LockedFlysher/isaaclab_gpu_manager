@@ -303,21 +303,41 @@ class MonitorPage(QWidget):
         self.gpu_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.gpu_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.gpu_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Top processes table (PID, User, Mem MiB, GPU, Name)
+        self.proc_table = QTableWidget(0, 5)
+        self.proc_table.setHorizontalHeaderLabels(["PID", "User", "Mem (MiB)", "GPU", "Name"])
+        self.proc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.proc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.proc_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.proc_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.proc_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.proc_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.proc_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Left vertical splitter: GPUs (top) and Top Processes (bottom)
+        left_split = QSplitter(Qt.Orientation.Vertical)
+        left_split.addWidget(self.gpu_table)
+        left_split.addWidget(self.proc_table)
+        left_split.setStretchFactor(0, 3)
+        left_split.setStretchFactor(1, 2)
         self.chart = QChart()
         self.chart.setTitle("Per-user VRAM (MiB)")
         self.chart_view = QChartView(self.chart)
         self.chart_view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        hbox.addWidget(self.gpu_table, 3)
+        hbox.addWidget(left_split, 3)
         hbox.addWidget(self.chart_view, 2)
         self.disconnect_btn.clicked.connect(lambda: self.disconnect_requested.emit())
 
-        # IsaacLab Runner panel -------------------------------------------
-        runner_box = QGroupBox("IsaacLab Command Runner")
+        # Runner panel container (no titled box)
+        runner_box = QWidget()
         r_v = QVBoxLayout(runner_box)
+        try:
+            r_v.setContentsMargins(0, 0, 0, 0)
+        except Exception:
+            pass
 
         # Top form: use a grid so labels align nicely
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
-        self.script_browse = QToolButton(); self.script_browse.setText("Browse")
+        self.script_browse = QPushButton("Browse")
         self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_combo.setMinimumWidth(220)
         self.conda_refresh = QPushButton("Refresh envs")
         top_form = QGridLayout(); top_form.setHorizontalSpacing(12); top_form.setVerticalSpacing(6)
@@ -375,8 +395,13 @@ class MonitorPage(QWidget):
         # Preview + Run
         self.preview_edit = QLineEdit(); self.preview_edit.setReadOnly(True)
         self.run_btn = QPushButton("Run")
-        self.clear_log_btn = QToolButton(); self.clear_log_btn.setText("Clear Log")
-        pr = QHBoxLayout(); pr.addWidget(QLabel("Preview")); pr.addWidget(self.preview_edit, 1); pr.addWidget(self.run_btn); pr.addWidget(self.clear_log_btn)
+        self.clear_log_btn = QPushButton("Clear Log")
+        self.log_toggle = QPushButton("Show Log"); self.log_toggle.setCheckable(True); self.log_toggle.setChecked(False)
+        try:
+            self.run_btn.setObjectName("primaryButton")
+        except Exception:
+            pass
+        pr = QHBoxLayout(); pr.addWidget(QLabel("Preview")); pr.addWidget(self.preview_edit, 1); pr.addWidget(self.run_btn); pr.addWidget(self.clear_log_btn); pr.addWidget(self.log_toggle)
         r_v.addLayout(pr)
 
         # Output log moves outside the box into a resizable splitter
@@ -395,8 +420,13 @@ class MonitorPage(QWidget):
         v_split = QSplitter(Qt.Orientation.Vertical)
         v_split.addWidget(runner_box)
         v_split.addWidget(self.output_log)
-        v_split.setStretchFactor(0, 2)
-        v_split.setStretchFactor(1, 3)
+        try:
+            v_split.setCollapsible(1, True)
+        except Exception:
+            pass
+        v_split.setStretchFactor(0, 3)
+        v_split.setStretchFactor(1, 2)
+        self.v_split = v_split
         rt_l.addWidget(v_split, 1)
         self.main_tabs.addTab(monitor_tab, "Monitor")
         self.main_tabs.addTab(runner_tab, "Runner")
@@ -419,6 +449,12 @@ class MonitorPage(QWidget):
         # refresh handling bound in MainWindow to ensure lifecycle
         self.script_browse.clicked.connect(self._on_browse_script)
         self.clear_log_btn.clicked.connect(self.output_log.clear)
+        self.log_toggle.toggled.connect(self._toggle_log)
+        # Default: hide log to maximize table height
+        try:
+            self._toggle_log(False)
+        except Exception:
+            pass
         # Preset buttons are wired in MainWindow for lifecycle
 
     def _on_refresh_conda(self) -> None:
@@ -432,6 +468,28 @@ class MonitorPage(QWidget):
         p = self.parent()
         if p and hasattr(p, "_browse_remote_script"):
             getattr(p, "_browse_remote_script")()
+
+    def _toggle_log(self, checked: bool) -> None:
+        # Show/hide bottom log area; keep splitter sizes reasonable
+        try:
+            if checked:
+                # show
+                self.output_log.setVisible(True)
+                self.log_toggle.setText("Hide Log")
+                # allocate more to bottom than zero
+                if hasattr(self, 'v_split'):
+                    w = max(1, self.v_split.size().height())
+                    self.v_split.setSizes([int(w*0.45), int(w*0.55)])
+            else:
+                # hide
+                self.log_toggle.setText("Show Log")
+                if hasattr(self, 'v_split'):
+                    w = max(1, self.v_split.size().height())
+                    self.v_split.setSizes([int(w*0.99), 0])
+                # keep widget hidden as well
+                self.output_log.setVisible(False)
+        except Exception:
+            pass
 
     # Keep first column at 1/3 width, second at 2/3
     def _apply_column_ratio(self, table: QTableWidget, r_first: float = 1.0/3.0) -> None:
@@ -525,6 +583,23 @@ class MonitorPage(QWidget):
         chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
         chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
         self.chart_view.setChart(chart)
+
+        # Build Top-10 processes by VRAM usage with owners
+        # Map GPU uuid -> index for display
+        uuid_to_idx = {g.uuid: g.index for g in snap.gpus}
+        pid_user = getattr(snap, 'pid_user_map', {}) or {}
+        rows = []
+        for a in snap.apps:
+            rows.append((a.used_memory_mib, a.pid, pid_user.get(a.pid, 'unknown'), uuid_to_idx.get(a.gpu_uuid, -1), a.process_name))
+        rows.sort(key=lambda r: r[0], reverse=True)
+        top = rows[:10]
+        self.proc_table.setRowCount(len(top))
+        for r, (mib, pid, user, gpu_idx, name) in enumerate(top):
+            self.proc_table.setItem(r, 0, QTableWidgetItem(str(pid)))
+            self.proc_table.setItem(r, 1, QTableWidgetItem(user))
+            self.proc_table.setItem(r, 2, QTableWidgetItem(str(mib)))
+            self.proc_table.setItem(r, 3, QTableWidgetItem(str(gpu_idx if gpu_idx >= 0 else ''))) 
+            self.proc_table.setItem(r, 4, QTableWidgetItem(name))
 
 
 class RemoteFileDialog(QDialog):
@@ -1330,6 +1405,22 @@ def main() -> None:
     _install_macos_stderr_filter()
 
     app = QApplication(sys.argv)
+    # Global styles: unify all buttons and inputs across pages
+    try:
+        app.setStyleSheet(
+            """
+            QGroupBox { font-weight: 600; border: 1px solid #dcdce0; border-radius: 8px; margin-top: 12px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; background: transparent; }
+            QLineEdit, QSpinBox, QComboBox, QPlainTextEdit { min-height: 28px; padding: 4px 6px; border: 1px solid #c9c9ce; border-radius: 6px; }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus { border: 1px solid #2d7ef7; }
+            QPushButton, QToolButton { min-height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid #2d7ef7; color: #2d7ef7; background: #ffffff; }
+            QPushButton#primaryButton, QToolButton#primaryButton { background: #2d7ef7; color: white; border: 1px solid #2d7ef7; }
+            QPushButton#primaryButton:disabled, QToolButton#primaryButton:disabled { background: #9dbcf7; }
+            QLabel { color: #222; }
+            """
+        )
+    except Exception:
+        pass
     w = MainWindow()
     w.show()
     sys.exit(app.exec())

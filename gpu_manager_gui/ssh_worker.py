@@ -18,6 +18,7 @@ class Snapshot:
     apps: List[ComputeApp]
     user_vram_mib: Dict[str, int]
     raw_errors: List[str]
+    pid_user_map: Dict[int, str] = None  # pid -> user (filled when available)
 
 
 class SSHGpuPoller(QThread):
@@ -174,11 +175,15 @@ class SSHGpuPoller(QThread):
                     pids.append(pid)
 
         out_ps = ""
+        pid_user_map: Dict[int, str] = {}
         if pids:
             pid_arg = ",".join(pids)
             rc3, out_ps, err3 = self._run_remote(f"ps -o pid=,user= -p {shlex.quote(pid_arg)}")
             if rc3 != 0 and err3:
                 errors.append(err3.strip())
+        if out_ps:
+            from .nvidia_parser import parse_ps_pid_user as _parse_ps
+            pid_user_map.update(_parse_ps(out_ps))
 
         gpus, apps, user_totals = summarize(out_gpus, out_apps, out_ps)
 
@@ -212,7 +217,15 @@ class SSHGpuPoller(QThread):
                     apps.append(ComputeApp(gpu_uuid=uuid, pid=pid, process_name=proc_name, used_memory_mib=fb_mib))
                     user = pid_map2.get(pid, "unknown")
                     user_totals[user] = user_totals.get(user, 0) + max(0, fb_mib)
-        return Snapshot(time.time(), gpus, apps, user_totals, errors)
+                pid_user_map = pid_map2
+        # Ensure map exists
+        pid_user_map = pid_user_map or {}
+        snap = Snapshot(time.time(), gpus, apps, user_totals, errors)
+        try:
+            snap.pid_user_map = pid_user_map
+        except Exception:
+            pass
+        return snap
 
     # QThread --------------------------------------------------------------
     def run(self) -> None:  # noqa: D401 - QThread run
