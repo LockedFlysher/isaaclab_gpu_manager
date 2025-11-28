@@ -19,7 +19,7 @@ def make_key(host: str, port: int, username: Optional[str]) -> str:
 
 
 def _default_config() -> Dict[str, Any]:
-    return {"version": 1, "last_used_key": None, "profiles": {}}
+    return {"version": 1, "last_used_key": None, "auto_connect_last_used": False, "profiles": {}, "runners": {}}
 
 
 def load_config() -> Dict[str, Any]:
@@ -35,9 +35,13 @@ def load_config() -> Dict[str, Any]:
             return _default_config()
         data.setdefault("version", 1)
         data.setdefault("last_used_key", None)
+        data.setdefault("auto_connect_last_used", False)
         data.setdefault("profiles", {})
+        data.setdefault("runners", {})
         if not isinstance(data["profiles"], dict):
             data["profiles"] = {}
+        if not isinstance(data["runners"], dict):
+            data["runners"] = {}
         return data
     except Exception:
         return _default_config()
@@ -49,6 +53,14 @@ def save_config(cfg: Dict[str, Any]) -> None:
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=True, allow_unicode=False)
+
+
+def yaml_available() -> bool:
+    return yaml is not None
+
+
+def config_path() -> str:
+    return CONFIG_FILE
 
 
 def encode_password(pw: str) -> str:
@@ -100,3 +112,28 @@ def save_profile(cfg: Dict[str, Any], profile: Dict[str, Any], password: Optiona
     cfg["last_used_key"] = key
     save_config(cfg)
 
+
+def runner_key(host: str, port: int, username: Optional[str]) -> str:
+    return make_key(host, port, username)
+
+
+def load_runner(cfg: Dict[str, Any], key: str, mode: str) -> Dict[str, Any]:
+    r = cfg.get("runners", {}).get(key, {}).get(mode, {})
+    if not isinstance(r, dict):
+        r = {}
+    # Normalize structure
+    r.setdefault("conda_env", "")
+    r.setdefault("script", "")
+    r.setdefault("params", [])  # list of [key, value]
+    r.setdefault("env", [])     # list of [key, value]
+    return r
+
+
+def save_runner(cfg: Dict[str, Any], key: str, mode: str, runner: Dict[str, Any]) -> None:
+    cfg.setdefault("runners", {}).setdefault(key, {})[mode] = {
+        "conda_env": runner.get("conda_env", ""),
+        "script": runner.get("script", ""),
+        "params": runner.get("params", []),
+        "env": runner.get("env", []),
+    }
+    save_config(cfg)
