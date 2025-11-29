@@ -384,11 +384,21 @@ class MonitorPage(QWidget):
         self.compose_dir_edit = QLineEdit(); self.compose_dir_edit.setPlaceholderText("/path/to/compose dir (e.g. ~/PycharmProjects/.../docker)")
         self.compose_service_edit = QLineEdit(); self.compose_service_edit.setPlaceholderText("service name (e.g. isaac-lab-nhb)")
         crow = QHBoxLayout();
-        crow.addWidget(QLabel("Conda")); crow.addWidget(self.conda_combo, 1); crow.addWidget(self.conda_refresh)
+        # Left: conda env selector
+        crow.addWidget(QLabel("Conda"))
+        crow.addWidget(self.conda_combo, 1)
         crow.addSpacing(12)
-        crow.addWidget(self.use_docker_cb); crow.addWidget(self.docker_combo, 1); crow.addWidget(self.docker_refresh)
+        # Middle: docker + container
+        crow.addWidget(self.use_docker_cb)
+        crow.addWidget(self.docker_combo, 1)
         crow.addSpacing(12)
-        crow.addWidget(self.use_compose_cb); crow.addWidget(self.compose_dir_edit, 1); crow.addWidget(self.compose_service_edit, 1)
+        # Middle: compose path/service
+        crow.addWidget(self.use_compose_cb)
+        crow.addWidget(self.compose_dir_edit, 1)
+        crow.addWidget(self.compose_service_edit, 1)
+        # Right: put Refresh at the far right
+        crow.addStretch(1)
+        crow.addWidget(self.conda_refresh)
         crow_w = QWidget(); crow_w.setLayout(crow)
         top_form.addWidget(crow_w, 2, 1)
         top_form.setColumnStretch(1, 1)
@@ -1195,8 +1205,10 @@ class MainWindow(QMainWindow):
             self.status.showMessage(msg, 5000)
 
     def _log_debug(self, text: str) -> None:
+        # Avoid polluting the interactive Console; log to stdout only
         try:
-            self.monitor_page.terminal.local_echo(text.rstrip("\n"))
+            sys.stdout.write((text.rstrip("\n") + "\n"))
+            sys.stdout.flush()
         except Exception:
             pass
 
@@ -1221,7 +1233,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Console", str(e) or "failed to create shell")
             return
         self._console_shell = shell
-        self.monitor_page.terminal.local_echo("[console] opening host shell…")
+        # Keep Console clean; avoid local echo here
         try:
             self.monitor_page.terminal.attach_shell(shell)
         except Exception:
@@ -1262,8 +1274,9 @@ class MainWindow(QMainWindow):
         try:
             sh.send_line(text)
         except Exception as e:
+            # Show send error in status bar only
             try:
-                self.monitor_page.terminal.local_echo(f"[console:error] send failed: {e}")
+                self.status.showMessage(f"Console send failed: {e}", 5000)
             except Exception:
                 pass
 
@@ -1282,10 +1295,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Compose", "Please fill Compose dir and service in Runner")
             return
         cmd = f"cd {compose_dir} && docker compose exec {compose_service} bash -l"
-        try:
-            self.monitor_page.terminal.local_echo(f"[console] {cmd}")
-        except Exception:
-            pass
+        # No local echo; command itself will run in the console session
         self._send_console_line(cmd)
 
     def _close_console_shell(self) -> None:
@@ -1353,17 +1363,15 @@ class MainWindow(QMainWindow):
 
     def _fetch_remote_os_info(self) -> None:
         hp = self._host_params
-        # Log activity to the console terminal for visibility
+        # Keep console clean; optional: write to stdout
         try:
-            self.monitor_page.terminal.local_echo(
-                "[osinfo] fetching at %s" % time.strftime('%H:%M:%S')
-            )
+            sys.stdout.write("[osinfo] fetching at %s\n" % time.strftime('%H:%M:%S'))
+            sys.stdout.flush()
         except Exception:
             pass
         if not hp:
-            # Not connected: inform user visibly and return
+            # Not connected: inform via status bar
             try:
-                self.monitor_page.terminal.local_echo("[osinfo] Not connected")
                 self.status.showMessage("Not connected", 5000)
             except Exception:
                 pass
@@ -1558,22 +1566,24 @@ class MainWindow(QMainWindow):
             # 主机模式：可使用 conda
             if use_docker and not docker_container:
                 try:
-                    self.monitor_page.terminal.local_echo("[run] docker 已勾选但未选择容器，将在主机上运行")
+                    self.status.showMessage("Docker 勾选但未选容器，将在主机上运行", 5000)
                 except Exception:
                     pass
             inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
 
         job = SSHCommandJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"), inner)
+        # Keep Console clean: show status only
         try:
-            self.monitor_page.terminal.local_echo("[run] starting job…")
+            self.status.showMessage("Run started…", 3000)
         except Exception:
             pass
         self.monitor_page.run_btn.setEnabled(False)
-        job.line.connect(lambda s: self.monitor_page.terminal.local_echo(s.rstrip("\n")))
-        job.error.connect(lambda m: self.monitor_page.terminal.local_echo(f"[error] {m}"))
+        # Do not stream job output into interactive Console; print to stdout instead
+        job.line.connect(lambda s: (sys.stdout.write(s.rstrip("\n")+"\n"), sys.stdout.flush()))
+        job.error.connect(lambda m: (sys.stdout.write(("[error] "+(m or "")).rstrip("\n")+"\n"), sys.stdout.flush()))
         def _done(rc: int) -> None:
             try:
-                self.monitor_page.terminal.local_echo(f"\n[exit] rc={rc}")
+                self.status.showMessage(f"Run finished (rc={rc})", 5000)
             except Exception:
                 pass
             self.monitor_page.run_btn.setEnabled(True)
@@ -1600,21 +1610,16 @@ class MainWindow(QMainWindow):
         # CondaEnvListJob is imported at module level with robust fallback for script/module runs
         hp = self._host_params
         if from_click:
+            # Optional debug to stdout only
             try:
-                self.monitor_page.terminal.local_echo(
-                    "[ui] Refresh envs clicked at %s" % time.strftime('%H:%M:%S')
-                )
-                self.monitor_page.terminal.local_echo(
-                    "[conda-detect] host=%s user=%s port=%s" % (
-                        hp.get('host'), hp.get('username'), hp.get('port')
-                    )
-                )
+                sys.stdout.write("[ui] Refresh envs clicked at %s\n" % time.strftime('%H:%M:%S'))
+                sys.stdout.write("[conda-detect] host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
+                sys.stdout.flush()
             except Exception:
                 pass
         if not hp:
             if from_click:
                 try:
-                    self.monitor_page.terminal.local_echo("[ui] Not connected; cannot refresh envs")
                     self.status.showMessage("Not connected", 5000)
                 except Exception:
                     pass
@@ -1642,7 +1647,6 @@ class MainWindow(QMainWindow):
         job.result.connect(self._on_conda_envs)
         def _on_error(m: str) -> None:
             try:
-                self.monitor_page.terminal.local_echo(("[conda-detect:error] " + (m or "")).rstrip("\n"))
                 self.status.showMessage(m or "conda refresh failed", 5000)
             finally:
                 if from_click:
@@ -1653,10 +1657,6 @@ class MainWindow(QMainWindow):
         job.error.connect(_on_error)
         def _dbg2(m: str) -> None:
             m = m.rstrip("\n")
-            try:
-                self.monitor_page.terminal.local_echo(m)
-            except Exception:
-                pass
             try:
                 sys.stdout.write(m + "\n"); sys.stdout.flush()
             except Exception:
@@ -1720,7 +1720,7 @@ class MainWindow(QMainWindow):
             pass
         if not envs:
             try:
-                self.monitor_page.terminal.local_echo("[conda-detect] No environments detected; type name manually or adjust init path.")
+                self.status.showMessage("No conda environments detected", 5000)
             except Exception:
                 pass
 
@@ -1746,15 +1746,11 @@ class MainWindow(QMainWindow):
         if not hp:
             if from_click:
                 try:
-                    self.monitor_page.terminal.local_echo("[ui] Not connected; cannot list containers")
+                    self.status.showMessage("Not connected", 5000)
                 except Exception:
                     pass
             return
         if from_click:
-            try:
-                self.monitor_page.terminal.local_echo("[ui] Refresh containers clicked at %s" % time.strftime('%H:%M:%S'))
-            except Exception:
-                pass
             try:
                 sys.stdout.write("[ui] Refresh containers clicked; host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
                 sys.stdout.flush()
@@ -1787,10 +1783,6 @@ class MainWindow(QMainWindow):
                 pass
         def _on_err(m: str) -> None:
             try:
-                self.monitor_page.terminal.local_echo(("[docker-detect:error] " + (m or "")).rstrip("\n"))
-            except Exception:
-                pass
-            try:
                 sys.stdout.write("[docker-detect:error] %s\n" % (m or ""))
                 sys.stdout.flush()
             except Exception:
@@ -1799,10 +1791,6 @@ class MainWindow(QMainWindow):
         job.error.connect(_on_err)
         def _dbg(s: str) -> None:
             s = s.rstrip("\n")
-            try:
-                self.monitor_page.terminal.local_echo(s)
-            except Exception:
-                pass
             try:
                 sys.stdout.write(s + "\n"); sys.stdout.flush()
             except Exception:
