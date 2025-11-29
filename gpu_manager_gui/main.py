@@ -45,7 +45,8 @@ from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidg
 # Support both `python -m gpu_manager_gui.main` and direct script run
 try:
     from .ssh_worker import SSHGpuPoller, Snapshot
-    from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob, RemoteListDirJob
+    from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob, RemoteListDirJob, SSHInteractiveShell
+    from .terminal_widget import TerminalWidget
     from . import config_store
 except Exception:  # running as a script: fix sys.path and import absolutely
     import os as _os, sys as _sys
@@ -55,6 +56,8 @@ except Exception:  # running as a script: fix sys.path and import absolutely
     from gpu_manager_gui.ssh_exec import RemoteOSInfoJob
     from gpu_manager_gui.ssh_exec import CondaEnvListJob
     from gpu_manager_gui.ssh_exec import RemoteListDirJob
+    from gpu_manager_gui.ssh_exec import SSHInteractiveShell
+    from gpu_manager_gui.terminal_widget import TerminalWidget
     from gpu_manager_gui import config_store
 
 
@@ -445,8 +448,22 @@ class MonitorPage(QWidget):
         v_split.setStretchFactor(1, 2)
         self.v_split = v_split
         rt_l.addWidget(v_split, 1)
+        # Console tab (interactive shell)
+        console_tab = QWidget(); ct_l = QVBoxLayout(console_tab)
+        cons_ctrl = QHBoxLayout()
+        self.console_open_btn = QPushButton("Open Host Shell")
+        self.console_compose_btn = QPushButton("Compose Shell")
+        self.console_close_btn = QPushButton("Close")
+        self.console_clear_btn = QPushButton("Clear")
+        cons_ctrl.addWidget(self.console_open_btn); cons_ctrl.addWidget(self.console_compose_btn)
+        cons_ctrl.addStretch(1); cons_ctrl.addWidget(self.console_clear_btn); cons_ctrl.addWidget(self.console_close_btn)
+        ct_l.addLayout(cons_ctrl)
+        self.terminal = TerminalWidget()
+        ct_l.addWidget(self.terminal, 1)
+
         self.main_tabs.addTab(monitor_tab, "Monitor")
         self.main_tabs.addTab(runner_tab, "Runner")
+        self.main_tabs.addTab(console_tab, "Console")
         layout.addWidget(self.main_tabs.widget(), 1)
 
         # Apply 1/3 : 2/3 column ratios and wire runner buttons
@@ -486,6 +503,14 @@ class MonitorPage(QWidget):
         self.use_compose_cb.toggled.connect(lambda _=None: self.preview_update_req.emit())
         self.compose_dir_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
         self.compose_service_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
+        # Console wiring (delegated to MainWindow)
+        try:
+            self.console_open_btn.clicked.connect(lambda: getattr(self._mw, '_open_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_console_shell') else None)
+            self.console_compose_btn.clicked.connect(lambda: getattr(self._mw, '_open_compose_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_compose_shell') else None)
+            self.console_close_btn.clicked.connect(lambda: getattr(self._mw, '_close_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_close_console_shell') else None)
+            self.console_clear_btn.clicked.connect(self.terminal.clear)
+        except Exception:
+            pass
         # Preset buttons are wired in MainWindow for lifecycle
 
     def _on_refresh_conda(self) -> None:
@@ -951,6 +976,8 @@ class MainWindow(QMainWindow):
         self._test_threads: list[ConnectTester] = []
         self._bg_jobs: list[QThread] = []
         self._host_params: Dict[str, Any] = {}
+        # Console session holder
+        self._console_shell = None
 
         # Pages
         self.stack = QStackedWidget()
@@ -974,6 +1001,11 @@ class MainWindow(QMainWindow):
         self.login_page.connect_requested.connect(self._begin_connect)
         self.login_page.test_requested.connect(self._test_connect)
         self.monitor_page.disconnect_requested.connect(self._disconnect)
+        # Provide back-reference for Console actions
+        try:
+            self.monitor_page._mw = self
+        except Exception:
+            pass
         # MonitorPage signals (robust across parent changes)
         try:
             self.monitor_page.docker_refresh_req.connect(lambda: self._detect_remote_docker_containers(True))
@@ -1160,6 +1192,102 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentIndex(0)
             self.status.showMessage("Disconnected")
 
+    # Console shell helpers -----------------------------------------------
+    def _open_console_shell(self) -> None:
+        if self._console_shell is not None:
+            self.status.showMessage("Console already open", 3000)
+            return
+        hp = self._host_params
+        if not hp:
+            QMessageBox.warning(self, "Not connected", "Please connect first")
+            return
+        try:
+            shell = SSHInteractiveShell(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"), strip_ansi=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Console", str(e) or "failed to create shell")
+            return
+        self._console_shell = shell
+        self.monitor_page.terminal.local_echo("[console] opening host shell…")
+        try:
+            self.monitor_page.terminal.attach_shell(shell)
+        except Exception:
+            pass
+        shell.data.connect(self.monitor_page.terminal.feed)
+        shell.error.connect(lambda m: self.monitor_page.terminal.local_echo(f"[console:error] {m}"))
+        shell.connected.connect(lambda: self.status.showMessage("Console connected", 3000))
+        try:
+            shell.connected.connect(lambda: self.monitor_page.terminal.send_resize())
+        except Exception:
+            pass
+        def _closed():
+            self.status.showMessage("Console closed", 3000)
+            self._console_shell = None
+            try:
+                self.monitor_page.terminal.detach_shell()
+            except Exception:
+                pass
+        shell.closed.connect(_closed)
+        shell.start()
+        # Focus console tab
+        try:
+            self.monitor_page.main_tabs._bar.setCurrentIndex(2)  # TopTabs bar index
+        except Exception:
+            pass
+        try:
+            self.monitor_page.terminal.setFocus()
+        except Exception:
+            pass
+
+    def _send_console_line(self, text: str) -> None:
+        if not text:
+            return
+        sh = self._console_shell
+        if sh is None:
+            self.status.showMessage("Console not open", 3000)
+            return
+        try:
+            sh.send_line(text)
+        except Exception as e:
+            try:
+                self.monitor_page.terminal.local_echo(f"[console:error] send failed: {e}")
+            except Exception:
+                pass
+
+    def _open_compose_shell(self) -> None:
+        # Ensure console is open
+        if self._console_shell is None:
+            self._open_console_shell()
+            # Will run compose after connected; simple delay
+            QThread.msleep(200)
+        r = self._collect_runner()
+        if not r.get("use_compose"):
+            self.status.showMessage("Compose not enabled; fill dir/service and toggle Compose", 5000)
+        compose_dir = (r.get("compose_dir") or "").strip()
+        compose_service = (r.get("compose_service") or "").strip()
+        if not compose_dir or not compose_service:
+            QMessageBox.warning(self, "Compose", "Please fill Compose dir and service in Runner")
+            return
+        cmd = f"cd {compose_dir} && docker compose exec {compose_service} bash -l"
+        try:
+            self.monitor_page.terminal.local_echo(f"[console] {cmd}")
+        except Exception:
+            pass
+        self._send_console_line(cmd)
+
+    def _close_console_shell(self) -> None:
+        sh = self._console_shell
+        if sh is None:
+            self.status.showMessage("Console already closed", 3000)
+            return
+        try:
+            sh.stop_shell()
+        except Exception:
+            pass
+        try:
+            self.monitor_page.terminal.detach_shell()
+        except Exception:
+            pass
+
     # Fallback UI update if MonitorPage lacks update_snapshot (defensive)
     def _update_snapshot_fallback(self, snap: Snapshot) -> None:
         mp = self.monitor_page
@@ -1328,37 +1456,12 @@ class MainWindow(QMainWindow):
             # Compose exec mode takes precedence when enabled and fields provided
             if use_compose and compose_dir and compose_service:
                 import shlex as _sh
+                # Keep it simple and identical to your manual flow: login shell + plain python
                 exports = " ".join(f"{k}={_sh.quote(v)}" for k, v in env_dict.items()) if env_dict else ""
-                conda_name = (r.get("conda_env") or "base")
-                # Build robust inner like docker exec path: try python variants; fallback to conda run
-                py_call_q = _sh.quote(base)
-                env_prefix_q = _sh.quote(exports) if exports else ""
-                inner_script = (
-                    "PY_CALL=" + py_call_q + "; "
-                    "ENV_PREFIX=" + (env_prefix_q or "\"\"") + "; "
-                    "ok=0; for PY in python python3 /usr/bin/python3 /usr/local/bin/python3; do "
-                    "  if command -v \"$PY\" >/dev/null 2>&1; then "
-                    "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /$PY }\"; "
-                    "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX $CMD\"; else eval \"$CMD\"; fi; ok=1; break; "
-                    "  fi; "
-                    "done; "
-                    "if [ \"$ok\" -eq 0 ]; then "
-                    "  (source ~/.bashrc >/dev/null 2>&1 || true); "
-                    "  for p in ~/miniconda3/etc/profile.d/conda.sh ~/anaconda3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" >/dev/null 2>&1 && break; done; "
-                    "  if command -v conda >/dev/null 2>&1; then "
-                    "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /python }\"; "
-                    "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; else eval \"conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; fi; ok=1; "
-                    "  fi; "
-                    "fi; "
-                    "if [ \"$ok\" -eq 0 ]; then echo '[compose-run] python not found in container' 1>&2; exit 127; fi"
-                )
-                final = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner_script)}"
+                inner = f"{exports} {base}".strip()
+                final = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner)}"
                 self.monitor_page.preview_edit.setText(final)
-                # Autosave when in compose mode as well
-                try:
-                    self._autosave_runner(r)
-                except Exception:
-                    pass
+                # Do not autosave on preview updates; save only on explicit Save/Run.
                 return
 
             if use_docker and not docker_container:
@@ -1367,11 +1470,7 @@ class MainWindow(QMainWindow):
             else:
                 inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None if not docker_container else None), base_cmd=base, docker_container=docker_container)
             self.monitor_page.preview_edit.setText(inner)
-            # Auto-save runner config silently when connected
-            try:
-                self._autosave_runner(r)
-            except Exception:
-                pass
+            # Do not autosave here; avoid time-based/background saves.
         except Exception as e:
             # Don't crash UI if preview build fails transiently
             try:
@@ -1514,9 +1613,9 @@ class MainWindow(QMainWindow):
         r = runner or self._collect_runner()
         try:
             config_store.save_runner(self._config, key, r.get("mode", "default"), r)
-            # Print to terminal for visibility once in a while
+            # Print to terminal for visibility
             try:
-                sys.stdout.write("[autosave] runner saved for %s\n" % key); sys.stdout.flush()
+                sys.stdout.write("[save] runner saved for %s\n" % key); sys.stdout.flush()
             except Exception:
                 pass
         except Exception:
@@ -1701,6 +1800,11 @@ class MainWindow(QMainWindow):
             return
         r = self._collect_runner()
         config_store.save_runner_preset(self._config, name, r)
+        # Also persist current runner for the connected host so Save acts as an explicit save.
+        try:
+            self._autosave_runner(r)
+        except Exception:
+            pass
         self.status.showMessage(f"Saved preset '{name}' (compose={bool(r.get('use_compose'))})")
         self._refresh_presets()
 

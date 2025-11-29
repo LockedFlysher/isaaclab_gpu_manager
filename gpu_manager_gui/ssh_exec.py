@@ -5,6 +5,7 @@ import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
+import re
 
 
 def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_cmd: str, docker_container: Optional[str] = None) -> str:
@@ -497,6 +498,130 @@ class DockerContainerListJob(QThread):
             if more:
                 names = sorted(set(more))
         self.result.emit(names)
+
+
+class SSHInteractiveShell(QThread):
+    """Interactive SSH shell with PTY. Emits raw text; supports send/close.
+
+    Designed for a single session per MainWindow. Use write() to send keys.
+    """
+    data = pyqtSignal(str)
+    error = pyqtSignal(str)
+    connected = pyqtSignal()
+    closed = pyqtSignal()
+
+    def __init__(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str], *, strip_ansi: bool = False) -> None:
+        super().__init__()
+        self._host = host
+        self._port = int(port)
+        self._user = username
+        self._identity = identity
+        self._password = password
+        self._client = None
+        self._chan = None
+        self._stop = False
+        self._strip_ansi = bool(strip_ansi)
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            self.error.emit("paramiko not installed; please pip install paramiko")
+            self.closed.emit()
+            return
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=self._host,
+                port=self._port,
+                username=self._user,
+                password=self._password,
+                key_filename=self._identity,
+                timeout=10.0,
+                banner_timeout=15.0,
+                auth_timeout=15.0,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            chan = client.invoke_shell(term='xterm')
+            chan.settimeout(0.2)
+            self._client = client
+            self._chan = chan
+            self.connected.emit()
+            # Read loop
+            import time
+            # ANSI/OSC escape filters
+            ansi_csi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+            osc = re.compile(r"\x1b\].*?(\x07|\x1b\\)")  # OSC ... BEL or ST
+            bracketed_paste = re.compile(r"\x1b\[\?2004[hl]")
+            def _clean(s: str) -> str:
+                # Drop OSC (title) and bracketed paste toggles
+                s = osc.sub("", s)
+                s = bracketed_paste.sub("", s)
+                # Strip CSI color/control sequences
+                s = ansi_csi.sub("", s)
+                # Normalize CRLF
+                s = s.replace("\r\n", "\n").replace("\r", "\n")
+                return s
+            while not self._stop:
+                try:
+                    if chan.recv_ready():
+                        data = chan.recv(4096)
+                        if not data:
+                            break
+                        text = data.decode(errors='ignore')
+                        if self._strip_ansi:
+                            # Backward-compatible cleaning when requested
+                            ansi_csi = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+                            osc = re.compile(r'\x1b\].*?(\x07|\x1b\\)')
+                            bracketed_paste = re.compile(r'\x1b\\?2004[hl]') if False else re.compile(r'\x1b\[\?2004[hl]')
+                            text = osc.sub('', text)
+                            text = bracketed_paste.sub('', text)
+                            text = ansi_csi.sub('', text)
+                            text = text.replace('\r\n', '\n').replace('\r', '\n')
+                        self.data.emit(text)
+                    else:
+                        time.sleep(0.05)
+                except Exception:
+                    time.sleep(0.05)
+            try:
+                chan.close()
+            except Exception:
+                pass
+            try:
+                client.close()
+            except Exception:
+                pass
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(str(e))
+        self.closed.emit()
+
+    def write(self, text: str) -> None:
+        try:
+            if self._chan is not None:
+                self._chan.send(text)
+        except Exception:
+            pass
+
+    def send_line(self, text: str) -> None:
+        self.write(text + "\n")
+
+    def stop_shell(self) -> None:
+        self._stop = True
+        try:
+            if self._chan is not None:
+                self._chan.close()
+        except Exception:
+            pass
+    # Allow external widgets to resize remote PTY size
+    def resize_pty(self, cols: int, rows: int) -> None:
+        try:
+            if self._chan is not None:
+                self._chan.resize_pty(width=cols, height=rows)
+        except Exception:
+            pass
+
 class RemoteListDirJob(QThread):
     """List a remote directory via SSH and emit (cwd, entries) where entries is a list of dicts.
 
