@@ -424,11 +424,11 @@ class DockerContainerListJob(QThread):
             "if [ -z \"$DOCKER_HOST\" ] && [ -n \"$XDG_RUNTIME_DIR\" ] && [ -S \"$XDG_RUNTIME_DIR/docker.sock\" ]; then export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; fi; "
             "echo '[docker-detect] DOCKER_HOST='${DOCKER_HOST:-'(default)'} 1>&2; "
             "DOCKERCMD=$(command -v docker 2>/dev/null || true); if [ -z \"$DOCKERCMD\" ] && [ -x /usr/bin/docker ]; then DOCKERCMD=/usr/bin/docker; fi; "
-            # names + ids to be safe; prefer names; try both direct and sudo (no password) and merge; also try -a
-            "OUT1=\"\"; OUT2=\"\"; OUT3=\"\"; OUT4=\"\"; "
-            "if [ -n \"$DOCKERCMD\" ]; then OUT1=\"$($DOCKERCMD ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; OUT3=\"$($DOCKERCMD ps -a --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; fi; "
-            "OUT2=\"$(sudo -n docker ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; OUT4=\"$(sudo -n docker ps -a --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; "
-            "printf '%s\n%s\n%s\n%s\n' \"$OUT1\" \"$OUT2\" \"$OUT3\" \"$OUT4\" | awk 'NF' | sort -u"
+            # Only list RUNNING containers (no -a)
+            "OUT1=\"\"; OUT2=\"\"; "
+            "if [ -n \"$DOCKERCMD\" ]; then OUT1=\"$($DOCKERCMD ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; fi; "
+            "OUT2=\"$(sudo -n docker ps --format '{{.Names}}\t{{.ID}}' 2>/dev/null || true)\"; "
+            "printf '%s\n%s\n' \"$OUT1\" \"$OUT2\" | awk 'NF' | sort -u"
         )
         if self._password:
             try:
@@ -470,7 +470,7 @@ class DockerContainerListJob(QThread):
             if name:
                 names.append(name)
         if not names:
-            # Also try plain `docker ps --format {{.Names}}` (no tab/ID) as a fallback
+            # Also try plain `docker ps --format {{.Names}}` as a fallback
             more = []
             try:
                 rc2, out2, err2 = self._run_remote("docker ps --format '{{.Names}}' 2>/dev/null || true")

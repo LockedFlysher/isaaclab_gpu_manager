@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QToolButton,
+    QButtonGroup,
     QSplitter,
     QTabBar,
 )
@@ -359,6 +360,10 @@ class MonitorPage(QWidget):
         self.script_edit = QLineEdit(); self.script_edit.setPlaceholderText("/path/to/train.py or play.py")
         self.script_browse = QPushButton("Browse")
         self.conda_combo = QComboBox(); self.conda_combo.setEditable(True); self.conda_combo.setMinimumWidth(220)
+        try:
+            self.conda_combo.setToolTip("仅主机模式有效：选择远端 conda 环境。")
+        except Exception:
+            pass
         self.conda_refresh = QPushButton("Refresh")
         top_form = QGridLayout(); top_form.setHorizontalSpacing(12); top_form.setVerticalSpacing(6)
         # Row 0: Presets (moved to the very top as requested)
@@ -375,17 +380,67 @@ class MonitorPage(QWidget):
         srow = QHBoxLayout(); srow.addWidget(self.script_edit, 1); srow.addWidget(self.script_browse)
         srow_w = QWidget(); srow_w.setLayout(srow)
         top_form.addWidget(srow_w, 1, 1)
-        # Row 2: Conda / Docker
-        top_form.addWidget(QLabel("Conda / Docker"), 2, 0)
+        # Row 2: Mode toggle (Conda vs Docker) placed at the left cell, replacing static label
+        mode_row = QHBoxLayout()
+        try:
+            mode_row.setContentsMargins(0, 0, 0, 0)
+            mode_row.setSpacing(6)
+        except Exception:
+            pass
+        self.mode_conda_btn = QToolButton(); self.mode_conda_btn.setText("Conda"); self.mode_conda_btn.setCheckable(True); self.mode_conda_btn.setChecked(True)
+        self.mode_docker_btn = QToolButton(); self.mode_docker_btn.setText("Docker"); self.mode_docker_btn.setCheckable(True)
+        try:
+            self.mode_conda_btn.setToolTip("主机模式（Conda）")
+            self.mode_docker_btn.setToolTip("容器模式（Docker/Compose）")
+            self.mode_conda_btn.setAutoRaise(True); self.mode_docker_btn.setAutoRaise(True)
+        except Exception:
+            pass
+        # Exclusive behavior via a button group
+        try:
+            grp = QButtonGroup(self)
+            grp.setExclusive(True)
+            grp.addButton(self.mode_conda_btn, 0)
+            grp.addButton(self.mode_docker_btn, 1)
+        except Exception:
+            pass
+        # Wire toggles to the hidden checkbox that drives logic
+        self.mode_conda_btn.toggled.connect(lambda c: (self.use_docker_cb.setChecked(False) if c else None))
+        self.mode_docker_btn.toggled.connect(lambda c: (self.use_docker_cb.setChecked(True) if c else None))
+        mode_row.addWidget(self.mode_conda_btn)
+        mode_row.addWidget(self.mode_docker_btn)
+        mode_w = QWidget(); mode_w.setLayout(mode_row)
+        top_form.addWidget(mode_w, 2, 0)
+        # Row 2 right content: Conda / Docker specific widgets
         self.use_docker_cb = QCheckBox("Docker")
+        try:
+            self.use_docker_cb.setToolTip("切换到容器模式（与 Conda 互斥）。")
+        except Exception:
+            pass
         self.docker_combo = QComboBox(); self.docker_combo.setEditable(False); self.docker_combo.setMinimumWidth(200)
+        try:
+            self.docker_combo.setToolTip("运行中的容器列表（docker ps）。")
+        except Exception:
+            pass
         self.docker_refresh = QPushButton("Refresh containers")
         self.use_compose_cb = QCheckBox("Compose")
+        try:
+            self.use_compose_cb.setToolTip("使用 docker compose 模式（服务名=compose.yml 中 services 的键名）。")
+        except Exception:
+            pass
         self.compose_dir_edit = QLineEdit(); self.compose_dir_edit.setPlaceholderText("/path/to/compose dir (e.g. ~/PycharmProjects/.../docker)")
+        try:
+            self.compose_dir_edit.setToolTip("compose.yml/docker-compose.yml 所在目录。")
+        except Exception:
+            pass
         self.compose_service_edit = QLineEdit(); self.compose_service_edit.setPlaceholderText("service name (e.g. isaac-lab-nhb)")
+        try:
+            self.compose_service_edit.setToolTip("Compose 服务名（services: 下的键名），不是容器名/镜像名。")
+        except Exception:
+            pass
         crow = QHBoxLayout();
         # Left: conda env selector
-        crow.addWidget(QLabel("Conda"))
+        self._lbl_conda = QLabel("Conda")
+        crow.addWidget(self._lbl_conda)
         crow.addWidget(self.conda_combo, 1)
         crow.addSpacing(12)
         # Middle: docker + container
@@ -398,6 +453,27 @@ class MonitorPage(QWidget):
         crow.addWidget(self.compose_service_edit, 1)
         # Right: put Refresh at the far right
         crow.addStretch(1)
+        # Hint: use a small '?' tool button with tooltip instead of inline text
+        try:
+            self._hint_btn = QToolButton()
+            self._hint_btn.setText("?")
+            self._hint_btn.setToolTip("容器下拉仅显示运行中的容器；Compose 的服务名 = compose.yml 中 services 的键名（非容器名/镜像名）。")
+            try:
+                self._hint_btn.setAutoRaise(True)
+            except Exception:
+                pass
+            try:
+                self._hint_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            except Exception:
+                pass
+            try:
+                self._hint_btn.setFixedSize(20, 20)
+                self._hint_btn.setStyleSheet("QToolButton { border: 1px solid #c9c9ce; border-radius: 10px; min-width: 20px; min-height: 20px; padding: 0; color:#555; }")
+            except Exception:
+                pass
+            crow.addWidget(self._hint_btn)
+        except Exception:
+            pass
         crow.addWidget(self.conda_refresh)
         crow_w = QWidget(); crow_w.setLayout(crow)
         top_form.addWidget(crow_w, 2, 1)
@@ -502,6 +578,11 @@ class MonitorPage(QWidget):
             pass
         # Compose wiring
         self.use_compose_cb.toggled.connect(lambda _=None: self.preview_update_req.emit())
+        # Also adjust visibility when toggling compose
+        try:
+            self.use_compose_cb.toggled.connect(lambda _=None: self._apply_runner_mode_visibility())
+        except Exception:
+            pass
         self.compose_dir_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
         self.compose_service_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
         # Console wiring (delegated to MainWindow)
@@ -561,7 +642,8 @@ class MonitorPage(QWidget):
             # Compose behaves independently; no auto-disable here
         except Exception:
             pass
-        # Auto refresh container list when toggled on
+        # Auto refresh container list when toggled on;
+        # when toggled off, ensure conda mode is primed (envs detected / default selected)
         try:
             if checked:
                 try:
@@ -570,10 +652,32 @@ class MonitorPage(QWidget):
                     pass
                 # emit signal to MainWindow
                 self.docker_refresh_req.emit()
+            else:
+                # Switched to host/conda mode. If no envs loaded, ask MainWindow to detect.
+                try:
+                    if self.conda_combo.count() == 0 and getattr(self, '_mw', None) and hasattr(self._mw, '_detect_remote_conda_envs'):
+                        self._mw._detect_remote_conda_envs(False)
+                    # If nothing selected, try to pick a sensible default (isaaclab/base/first)
+                    cur = self.conda_combo.currentText().strip()
+                    if not cur and self.conda_combo.count() > 0:
+                        for pref in ("isaaclab", "isaac", "base"):
+                            idx = self.conda_combo.findText(pref)
+                            if idx >= 0:
+                                self.conda_combo.setCurrentIndex(idx)
+                                break
+                        else:
+                            self.conda_combo.setCurrentIndex(0)
+                except Exception:
+                    pass
         except Exception:
             pass
         # ask MainWindow to rebuild preview
         self.preview_update_req.emit()
+        # Apply show/hide of widgets according to mode
+        try:
+            self._apply_runner_mode_visibility()
+        except Exception:
+            pass
 
     def _on_refresh_docker(self) -> None:
         try:
@@ -615,6 +719,28 @@ class MonitorPage(QWidget):
         except Exception:
             pass
         return super().eventFilter(obj, ev)
+
+    def _apply_runner_mode_visibility(self) -> None:
+        """Hide the unselected section: Conda vs Docker mutually exclusive; Compose fields only when Compose is on."""
+        try:
+            d = bool(self.use_docker_cb.isChecked())
+        except Exception:
+            d = False
+        try:
+            # Conda controls
+            self._lbl_conda.setVisible(not d)
+            self.conda_combo.setVisible(not d)
+            # Docker controls
+            self.docker_combo.setVisible(d)
+            self.use_compose_cb.setVisible(d)
+            # Compose fields only visible when both docker and compose toggled
+            comp_on = d and bool(self.use_compose_cb.isChecked())
+            self.compose_dir_edit.setVisible(comp_on)
+            self.compose_service_edit.setVisible(comp_on)
+            if hasattr(self, '_hint_btn'):
+                self._hint_btn.setVisible(d)
+        except Exception:
+            pass
 
     def set_preview_commands(self, cmds: list[str]) -> None:
         """Render per-command preview rows with a copy button for each."""
