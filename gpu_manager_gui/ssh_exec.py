@@ -14,32 +14,19 @@ def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_c
     cmd = base_cmd
     # If docker is selected, wrap with docker exec; conda settings are ignored in this case
     if docker_container:
-        # Robust python fallback inside container: try python, then python3, then conda run
-        # Keep the original python invocation as PY_CALL, and replace leading 'python ' with the detected interpreter.
+        # Container mode is exclusive with conda. Try python variants only.
         import shlex as _sh
         py_call_q = _sh.quote(cmd)
         env_prefix_q = _sh.quote(exports) if exports else ""
-        # Prefer user-chosen conda env inside container if given, else try 'base'
-        conda_name = (conda_env or "base")
         inner_script = (
             "PY_CALL=" + py_call_q + "; "
             "ENV_PREFIX=" + (env_prefix_q or "\"\"") + "; "
-            # Try python variants first
             "ok=0; for PY in python python3 /usr/bin/python3 /usr/local/bin/python3; do "
             "  if command -v \"$PY\" >/dev/null 2>&1; then "
             "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /$PY }\"; "
             "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX $CMD\"; else eval \"$CMD\"; fi; ok=1; break; "
             "  fi; "
             "done; "
-            # Try conda run inside the container
-            "if [ \"$ok\" -eq 0 ]; then "
-            "  (source ~/.bashrc >/dev/null 2>&1 || true); "
-            "  for p in ~/miniconda3/etc/profile.d/conda.sh ~/anaconda3/etc/profile.d/conda.sh /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" >/dev/null 2>&1 && break; done; "
-            "  if command -v conda >/dev/null 2>&1; then "
-            "    CMD=\"$PY_CALL\"; CMD=\"${CMD/#python /python }\"; "
-            "    if [ -n \"$ENV_PREFIX\" ]; then eval \"$ENV_PREFIX conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; else eval \"conda run -n " + _sh.quote(conda_name) + " --no-capture-output $CMD\"; fi; ok=1; "
-            "  fi; "
-            "fi; "
             "if [ \"$ok\" -eq 0 ]; then echo '[docker-run] python not found in container' 1>&2; exit 127; fi"
         )
         # Use login shell (-l) to pick up /etc/profile and system PATH adjustments

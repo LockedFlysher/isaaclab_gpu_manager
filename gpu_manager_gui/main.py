@@ -225,9 +225,20 @@ class LoginPage(QWidget):
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; background: transparent; }
             QLineEdit, QSpinBox, QComboBox { min-height: 28px; padding: 4px 6px; border: 1px solid #c9c9ce; border-radius: 6px; }
             QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #2d7ef7; }
+
+            /* Button base */
             QPushButton { min-height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid #2d7ef7; color: #2d7ef7; background: #ffffff; }
+            QPushButton:hover { background: #f0f6ff; }
+            QPushButton:pressed { background: #dbe9ff; border: 1px solid #1e6de6; color: #1e6de6; }
+            QPushButton:disabled { color: #9bb5ec; border: 1px solid #b7cbf5; background: #f5f8ff; }
+            QPushButton:checked { background: #eaf2ff; border: 1px solid #2d7ef7; color: #1e6de6; }
+
+            /* Primary buttons */
             QPushButton#primaryButton { background: #2d7ef7; color: white; border: 1px solid #2d7ef7; }
-            QPushButton#primaryButton:disabled { background: #9dbcf7; }
+            QPushButton#primaryButton:hover { background: #3a86f8; }
+            QPushButton#primaryButton:pressed { background: #1e6de6; border: 1px solid #1e6de6; }
+            QPushButton#primaryButton:disabled { background: #9dbcf7; color: white; border: 1px solid #9dbcf7; }
+
             QLabel { color: #222; }
             """
         )
@@ -413,41 +424,27 @@ class MonitorPage(QWidget):
         r_v.addWidget(lr_split, 1)
 
         # Preview + Run
-        self.preview_edit = QLineEdit(); self.preview_edit.setReadOnly(True)
+        # Preview header + per-command list with copy buttons
         self.run_btn = QPushButton("Run")
-        self.clear_log_btn = QPushButton("Clear Log")
-        self.log_toggle = QPushButton("Show Log"); self.log_toggle.setCheckable(True); self.log_toggle.setChecked(False)
         try:
             self.run_btn.setObjectName("primaryButton")
         except Exception:
             pass
-        pr = QHBoxLayout(); pr.addWidget(QLabel("Preview")); pr.addWidget(self.preview_edit, 1); pr.addWidget(self.run_btn); pr.addWidget(self.clear_log_btn); pr.addWidget(self.log_toggle)
-        r_v.addLayout(pr)
-
-        # Output log moves outside the box into a resizable splitter
-        self.output_log = QPlainTextEdit(); self.output_log.setReadOnly(True)
+        ph = QHBoxLayout(); ph.addWidget(QLabel("Preview")); ph.addStretch(1); ph.addWidget(self.run_btn)
+        r_v.addLayout(ph)
+        self.preview_area = QWidget(); self.preview_vbox = QVBoxLayout(self.preview_area)
         try:
-            from PyQt6.QtWidgets import QPlainTextEdit as _QPE
-            self.output_log.setLineWrapMode(_QPE.LineWrapMode.NoWrap)
+            self.preview_vbox.setContentsMargins(0, 0, 0, 0)
+            self.preview_vbox.setSpacing(0)
         except Exception:
             pass
-        self.output_log.setMaximumBlockCount(10000)
+        r_v.addWidget(self.preview_area)
 
         # Tabs: Monitor vs Runner (top-level main tabs, left-aligned)
         self.main_tabs = TopTabs()
         monitor_tab = QWidget(); mt_l = QVBoxLayout(monitor_tab); mt_l.addLayout(top); mt_l.addWidget(center, 1)
         runner_tab = QWidget(); rt_l = QVBoxLayout(runner_tab)
-        v_split = QSplitter(Qt.Orientation.Vertical)
-        v_split.addWidget(runner_box)
-        v_split.addWidget(self.output_log)
-        try:
-            v_split.setCollapsible(1, True)
-        except Exception:
-            pass
-        v_split.setStretchFactor(0, 3)
-        v_split.setStretchFactor(1, 2)
-        self.v_split = v_split
-        rt_l.addWidget(v_split, 1)
+        rt_l.addWidget(runner_box, 1)
         # Console tab (interactive shell)
         console_tab = QWidget(); ct_l = QVBoxLayout(console_tab)
         cons_ctrl = QHBoxLayout()
@@ -482,13 +479,7 @@ class MonitorPage(QWidget):
         # Run click is wired in MainWindow to ensure lifecycle
         # refresh handling bound in MainWindow to ensure lifecycle
         self.script_browse.clicked.connect(self._on_browse_script)
-        self.clear_log_btn.clicked.connect(self.output_log.clear)
-        self.log_toggle.toggled.connect(self._toggle_log)
-        # Default: hide log to maximize table height
-        try:
-            self._toggle_log(False)
-        except Exception:
-            pass
+        # Populate per-command preview on demand (MainWindow drives updates)
         # Docker toggle wiring
         self.use_docker_cb.toggled.connect(self._on_docker_toggle)
         self.docker_combo.currentTextChanged.connect(lambda _=None: self.preview_update_req.emit())
@@ -546,27 +537,8 @@ class MonitorPage(QWidget):
         if p and hasattr(p, "_browse_remote_script"):
             getattr(p, "_browse_remote_script")()
 
-    def _toggle_log(self, checked: bool) -> None:
-        # Show/hide bottom log area; keep splitter sizes reasonable
-        try:
-            if checked:
-                # show
-                self.output_log.setVisible(True)
-                self.log_toggle.setText("Hide Log")
-                # allocate more to bottom than zero
-                if hasattr(self, 'v_split'):
-                    w = max(1, self.v_split.size().height())
-                    self.v_split.setSizes([int(w*0.45), int(w*0.55)])
-            else:
-                # hide
-                self.log_toggle.setText("Show Log")
-                if hasattr(self, 'v_split'):
-                    w = max(1, self.v_split.size().height())
-                    self.v_split.setSizes([int(w*0.99), 0])
-                # keep widget hidden as well
-                self.output_log.setVisible(False)
-        except Exception:
-            pass
+    # Previously we had a Show/Hide Log toggle here. Now we keep the output log
+    # visible by default and let users adjust its size via the splitter handle.
 
     def _on_docker_toggle(self, checked: bool) -> None:
         # Enable/disable conda widgets when docker is selected
@@ -633,6 +605,45 @@ class MonitorPage(QWidget):
         except Exception:
             pass
         return super().eventFilter(obj, ev)
+
+    def set_preview_commands(self, cmds: list[str]) -> None:
+        """Render per-command preview rows with a copy button for each."""
+        try:
+            layout = self.preview_vbox
+        except Exception:
+            return
+        # Clear previous rows (widgets and spacers)
+        try:
+            while layout.count():
+                it = layout.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    w.deleteLater()
+            try:
+                layout.setSpacing(0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Add one row per command
+        for cmd in (cmds or []):
+            row = QHBoxLayout()
+            try:
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(0)
+            except Exception:
+                pass
+            le = QLineEdit(); le.setReadOnly(True); le.setText(cmd)
+            btn = QPushButton("复制")
+            try:
+                btn.clicked.connect(lambda _=False, t=cmd: QApplication.clipboard().setText(t))
+            except Exception:
+                pass
+            row.addWidget(le, 1)
+            row.addWidget(btn)
+            w = QWidget(); w.setLayout(row)
+            layout.addWidget(w)
+        # No trailing stretch; keep lines tight
 
     def _add_row(self, table: QTableWidget) -> None:
         row = table.rowCount()
@@ -1184,7 +1195,10 @@ class MainWindow(QMainWindow):
             self.status.showMessage(msg, 5000)
 
     def _log_debug(self, text: str) -> None:
-        self.monitor_page.output_log.appendPlainText(text.rstrip("\n"))
+        try:
+            self.monitor_page.terminal.local_echo(text.rstrip("\n"))
+        except Exception:
+            pass
 
     def _on_poller_finished(self) -> None:
         self._poller = None
@@ -1339,17 +1353,17 @@ class MainWindow(QMainWindow):
 
     def _fetch_remote_os_info(self) -> None:
         hp = self._host_params
-        # Always log the click into the Runner output so user sees activity
+        # Log activity to the console terminal for visibility
         try:
-            self.monitor_page.output_log.appendPlainText(
-                "[ui] Refresh envs clicked at %s" % time.strftime('%H:%M:%S')
+            self.monitor_page.terminal.local_echo(
+                "[osinfo] fetching at %s" % time.strftime('%H:%M:%S')
             )
         except Exception:
             pass
         if not hp:
             # Not connected: inform user visibly and return
             try:
-                self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot refresh envs")
+                self.monitor_page.terminal.local_echo("[osinfo] Not connected")
                 self.status.showMessage("Not connected", 5000)
             except Exception:
                 pass
@@ -1443,40 +1457,76 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _update_runner_preview(self) -> None:
+        """Render multi-stage shell commands (no comments) with per-command copy UI."""
         try:
             r = self._collect_runner()
-            env_dict = {k: v for k, v in r.get("env", [])}
-            base = self._build_python_cmd(r)
-            use_docker = bool(r.get("use_docker"))
-            docker_container = (r.get("docker_container") or "").strip() if use_docker else None
-            use_compose = bool(r.get("use_compose"))
-            compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
-            compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
-
-            # Compose exec mode takes precedence when enabled and fields provided
-            if use_compose and compose_dir and compose_service:
-                import shlex as _sh
-                # Keep it simple and identical to your manual flow: login shell + plain python
-                exports = " ".join(f"{k}={_sh.quote(v)}" for k, v in env_dict.items()) if env_dict else ""
-                inner = f"{exports} {base}".strip()
-                final = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner)}"
-                self.monitor_page.preview_edit.setText(final)
-                # Do not autosave on preview updates; save only on explicit Save/Run.
-                return
-
-            if use_docker and not docker_container:
-                # Show a helpful placeholder to indicate docker mode is active
-                inner = f"docker exec -i <container> bash -lc {shlex.quote(base)}"
+            cmds = self._build_preview_commands(r)
+            if hasattr(self.monitor_page, 'set_preview_commands'):
+                self.monitor_page.set_preview_commands(cmds)
             else:
-                inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None if not docker_container else None), base_cmd=base, docker_container=docker_container)
-            self.monitor_page.preview_edit.setText(inner)
-            # Do not autosave here; avoid time-based/background saves.
+                # Fallback: show as concatenated text if legacy widget present
+                try:
+                    self.monitor_page.preview_edit.setPlainText("\n".join(cmds))
+                except Exception:
+                    pass
         except Exception as e:
-            # Don't crash UI if preview build fails transiently
             try:
                 self._log_debug(f"[ui:error] preview failed: {e}")
             except Exception:
                 pass
+
+    def _build_preview_commands(self, r: Dict[str, Any]) -> list[str]:
+        """Return ordered shell commands without comments for the preview list."""
+        import shlex as _sh
+        env_dict = {k: v for k, v in r.get("env", [])}
+        use_docker = bool(r.get("use_docker"))
+        docker_container = (r.get("docker_container") or "").strip() if use_docker else ""
+        use_compose = bool(r.get("use_compose"))
+        compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
+        compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
+        # container vs conda: mutually exclusive
+        conda_env = "" if (use_docker or use_compose) else (r.get("conda_env") or "").strip()
+
+        base_py = self._build_python_cmd(r)
+
+        def _env_exports_lines() -> list[str]:
+            return [f"export {k}={_sh.quote(str(v))}" for k, v in env_dict.items()]
+
+        def _conda_lines() -> list[str]:
+            if not conda_env:
+                return []
+            return [
+                "for p in \"$HOME/miniconda3/etc/profile.d/conda.sh\" \"$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" && break; done",
+                f"conda activate {_sh.quote(conda_env)}",
+            ]
+
+        cmds: list[str] = []
+        if use_compose and compose_dir and compose_service:
+            cmds += [
+                f"cd {_sh.quote(compose_dir)}",
+                f"docker compose exec {_sh.quote(compose_service)} bash -l",
+            ]
+            cmds += _env_exports_lines()
+            cmds.append(base_py)
+            return cmds
+
+        if use_docker and docker_container:
+            cmds += [f"docker exec -it {_sh.quote(docker_container)} bash -l"]
+            cmds += _env_exports_lines()
+            cmds.append(base_py)
+            return cmds
+
+        if use_docker and not docker_container:
+            cmds += ["docker exec -it <container> bash -l"]
+            cmds += _env_exports_lines()
+            cmds.append(base_py)
+            return cmds
+
+        # host conda or system python
+        cmds += _conda_lines()
+        cmds += _env_exports_lines()
+        cmds.append(base_py)
+        return cmds
 
     def _run_runner(self) -> None:
         hp = self._host_params
@@ -1490,14 +1540,42 @@ class MainWindow(QMainWindow):
             config_store.save_runner(self._config, key, r["mode"], r)
         env_dict = {k: v for k, v in r.get("env", [])}
         base = self._build_python_cmd(r)
-        inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
+        use_docker = bool(r.get("use_docker"))
+        docker_container = (r.get("docker_container") or "").strip() if use_docker else ""
+        use_compose = bool(r.get("use_compose"))
+        compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
+        compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
+
+        if use_compose and compose_dir and compose_service:
+            # Compose 模式：在宿主机 cd 到目录，再进入服务 shell 执行命令
+            import shlex as _sh
+            inner_in_container = SSHCommandJob.build_inner(env=env_dict, conda_env=None, base_cmd=base, docker_container=None)
+            inner = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner_in_container)}"
+        elif use_docker and docker_container:
+            # Docker 模式：通过 docker exec 在容器内执行（不使用 conda）
+            inner = SSHCommandJob.build_inner(env=env_dict, conda_env=None, base_cmd=base, docker_container=docker_container)
+        else:
+            # 主机模式：可使用 conda
+            if use_docker and not docker_container:
+                try:
+                    self.monitor_page.terminal.local_echo("[run] docker 已勾选但未选择容器，将在主机上运行")
+                except Exception:
+                    pass
+            inner = SSHCommandJob.build_inner(env=env_dict, conda_env=(r.get("conda_env") or None), base_cmd=base)
+
         job = SSHCommandJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"), inner)
-        self.monitor_page.output_log.clear()
+        try:
+            self.monitor_page.terminal.local_echo("[run] starting job…")
+        except Exception:
+            pass
         self.monitor_page.run_btn.setEnabled(False)
-        job.line.connect(lambda s: self.monitor_page.output_log.appendPlainText(s.rstrip("\n")))
-        job.error.connect(lambda m: self.monitor_page.output_log.appendPlainText(f"[error] {m}"))
+        job.line.connect(lambda s: self.monitor_page.terminal.local_echo(s.rstrip("\n")))
+        job.error.connect(lambda m: self.monitor_page.terminal.local_echo(f"[error] {m}"))
         def _done(rc: int) -> None:
-            self.monitor_page.output_log.appendPlainText(f"\n[exit] rc={rc}")
+            try:
+                self.monitor_page.terminal.local_echo(f"\n[exit] rc={rc}")
+            except Exception:
+                pass
             self.monitor_page.run_btn.setEnabled(True)
         job.finished.connect(_done)
         job.setParent(self)
@@ -1523,10 +1601,10 @@ class MainWindow(QMainWindow):
         hp = self._host_params
         if from_click:
             try:
-                self.monitor_page.output_log.appendPlainText(
+                self.monitor_page.terminal.local_echo(
                     "[ui] Refresh envs clicked at %s" % time.strftime('%H:%M:%S')
                 )
-                self.monitor_page.output_log.appendPlainText(
+                self.monitor_page.terminal.local_echo(
                     "[conda-detect] host=%s user=%s port=%s" % (
                         hp.get('host'), hp.get('username'), hp.get('port')
                     )
@@ -1536,7 +1614,7 @@ class MainWindow(QMainWindow):
         if not hp:
             if from_click:
                 try:
-                    self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot refresh envs")
+                    self.monitor_page.terminal.local_echo("[ui] Not connected; cannot refresh envs")
                     self.status.showMessage("Not connected", 5000)
                 except Exception:
                     pass
@@ -1564,7 +1642,7 @@ class MainWindow(QMainWindow):
         job.result.connect(self._on_conda_envs)
         def _on_error(m: str) -> None:
             try:
-                self.monitor_page.output_log.appendPlainText(("[conda-detect:error] " + (m or "")).rstrip("\n"))
+                self.monitor_page.terminal.local_echo(("[conda-detect:error] " + (m or "")).rstrip("\n"))
                 self.status.showMessage(m or "conda refresh failed", 5000)
             finally:
                 if from_click:
@@ -1576,7 +1654,7 @@ class MainWindow(QMainWindow):
         def _dbg2(m: str) -> None:
             m = m.rstrip("\n")
             try:
-                self.monitor_page.output_log.appendPlainText(m)
+                self.monitor_page.terminal.local_echo(m)
             except Exception:
                 pass
             try:
@@ -1640,8 +1718,11 @@ class MainWindow(QMainWindow):
             sys.stdout.write("[conda-detect] envs: %s\n" % (", ".join(envs) if envs else "<none>")); sys.stdout.flush()
         except Exception:
             pass
-        if not envs and hasattr(self.monitor_page, 'output_log'):
-            self.monitor_page.output_log.appendPlainText("[conda-detect] No environments detected; type name manually or adjust init path.")
+        if not envs:
+            try:
+                self.monitor_page.terminal.local_echo("[conda-detect] No environments detected; type name manually or adjust init path.")
+            except Exception:
+                pass
 
     def _detect_remote_docker_containers(self, from_click: bool = False) -> None:
         hp = self._host_params
@@ -1665,14 +1746,16 @@ class MainWindow(QMainWindow):
         if not hp:
             if from_click:
                 try:
-                    self.monitor_page.output_log.appendPlainText("[ui] Not connected; cannot list containers")
+                    self.monitor_page.terminal.local_echo("[ui] Not connected; cannot list containers")
                 except Exception:
                     pass
             return
         if from_click:
             try:
-                self.monitor_page.output_log.appendPlainText("[ui] Refresh containers clicked at %s" % time.strftime('%H:%M:%S'))
-                # Also print to terminal so user sees it without opening the log panel
+                self.monitor_page.terminal.local_echo("[ui] Refresh containers clicked at %s" % time.strftime('%H:%M:%S'))
+            except Exception:
+                pass
+            try:
                 sys.stdout.write("[ui] Refresh containers clicked; host=%s user=%s port=%s\n" % (hp.get('host'), hp.get('username'), hp.get('port')))
                 sys.stdout.flush()
             except Exception:
@@ -1704,7 +1787,10 @@ class MainWindow(QMainWindow):
                 pass
         def _on_err(m: str) -> None:
             try:
-                self.monitor_page.output_log.appendPlainText(("[docker-detect:error] " + (m or "")).rstrip("\n"))
+                self.monitor_page.terminal.local_echo(("[docker-detect:error] " + (m or "")).rstrip("\n"))
+            except Exception:
+                pass
+            try:
                 sys.stdout.write("[docker-detect:error] %s\n" % (m or ""))
                 sys.stdout.flush()
             except Exception:
@@ -1714,7 +1800,7 @@ class MainWindow(QMainWindow):
         def _dbg(s: str) -> None:
             s = s.rstrip("\n")
             try:
-                self.monitor_page.output_log.appendPlainText(s)
+                self.monitor_page.terminal.local_echo(s)
             except Exception:
                 pass
             try:
@@ -1872,9 +1958,19 @@ def main() -> None:
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; background: transparent; }
             QLineEdit, QSpinBox, QComboBox, QPlainTextEdit { min-height: 28px; padding: 4px 6px; border: 1px solid #c9c9ce; border-radius: 6px; }
             QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus { border: 1px solid #2d7ef7; }
+
+            /* Buttons (global) */
             QPushButton, QToolButton { min-height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid #2d7ef7; color: #2d7ef7; background: #ffffff; }
+            QPushButton:hover, QToolButton:hover { background: #f0f6ff; }
+            QPushButton:pressed, QToolButton:pressed { background: #dbe9ff; border: 1px solid #1e6de6; color: #1e6de6; }
+            QPushButton:disabled, QToolButton:disabled { color: #9bb5ec; border: 1px solid #b7cbf5; background: #f5f8ff; }
+            QPushButton:checked, QToolButton:checked { background: #eaf2ff; border: 1px solid #2d7ef7; color: #1e6de6; }
+
             QPushButton#primaryButton, QToolButton#primaryButton { background: #2d7ef7; color: white; border: 1px solid #2d7ef7; }
-            QPushButton#primaryButton:disabled, QToolButton#primaryButton:disabled { background: #9dbcf7; }
+            QPushButton#primaryButton:hover, QToolButton#primaryButton:hover { background: #3a86f8; }
+            QPushButton#primaryButton:pressed, QToolButton#primaryButton:pressed { background: #1e6de6; border: 1px solid #1e6de6; }
+            QPushButton#primaryButton:disabled, QToolButton#primaryButton:disabled { background: #9dbcf7; color: white; border: 1px solid #9dbcf7; }
+
             QLabel { color: #222; }
             """
         )
