@@ -4,8 +4,8 @@ import math
 import re
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QEvent
-from PyQt6.QtGui import QKeyEvent, QTextCursor
+from PyQt6.QtCore import Qt, QEvent, QTimer
+from PyQt6.QtGui import QKeyEvent, QTextCursor, QPainter
 from PyQt6.QtWidgets import QPlainTextEdit
 
 
@@ -35,8 +35,13 @@ class TerminalWidget(QPlainTextEdit):
             self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         except Exception:
             pass
+        # Keep at most 1000 lines (blocks) to bound memory usage
+        try:
+            self.setMaximumBlockCount(1000)
+        except Exception:
+            pass
         self.setUndoRedoEnabled(False)
-        self.setCursorWidth(0)  # hide text cursor
+        self.setCursorWidth(0)  # hide Qt cursor; we draw our own blinking caret
         # Keep a simple last-line buffer and column position to implement CR/EL
         self._line_buf: str = ""
         self._col: int = 0
@@ -47,6 +52,11 @@ class TerminalWidget(QPlainTextEdit):
         self._re_osc = re.compile(r"\x1b\].*?(\x07|\x1b\\)")
         self._re_bracketed = re.compile(r"\x1b\[\?2004[hl]")
         self._pending_scroll_to_end = False
+        # Blinking caret state
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(530)
+        self._blink_timer.timeout.connect(self._toggle_blink)
+        self._cursor_on = True
         # Ensure focus to capture keys
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -137,6 +147,28 @@ class TerminalWidget(QPlainTextEdit):
             cur.movePosition(QTextCursor.MoveOperation.End)
             self.setTextCursor(cur)
             self.ensureCursorVisible()
+        # Draw a simple blinking caret at (_col) on the last line when focused
+        try:
+            if self._shell is not None and self.hasFocus() and self._cursor_on:
+                doc = self.document()
+                blk = doc.lastBlock()
+                # Last block length includes a separator; clamp to visible chars
+                max_pos = max(0, blk.length() - 1)
+                pos = blk.position() + min(max(self._col, 0), max_pos)
+                cur2 = QTextCursor(doc)
+                cur2.setPosition(pos)
+                r = self.cursorRect(cur2)
+                p = QPainter(self.viewport())
+                try:
+                    # Bar-style caret: thin rect using text color with slight transparency
+                    w = max(2, int(self.fontMetrics().horizontalAdvance("M") * 0.08))
+                    color = self.palette().text().color()
+                    color.setAlpha(190)
+                    p.fillRect(r.left(), r.top(), w, r.height(), color)
+                finally:
+                    p.end()
+        except Exception:
+            pass
 
     def _append_newline(self) -> None:
         cur = self.textCursor()
@@ -351,3 +383,32 @@ class TerminalWidget(QPlainTextEdit):
     def send_resize(self) -> None:
         """Public wrapper to trigger a PTY resize based on current widget size."""
         self._send_resize()
+
+    # Caret blink helpers -------------------------------------------------
+    def focusInEvent(self, ev: QEvent) -> None:  # noqa: N802 - Qt override
+        try:
+            self._cursor_on = True
+            self._blink_timer.start()
+        except Exception:
+            pass
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev: QEvent) -> None:  # noqa: N802 - Qt override
+        try:
+            self._blink_timer.stop()
+            self._cursor_on = False
+            self.viewport().update()
+        except Exception:
+            pass
+        super().focusOutEvent(ev)
+
+    def _toggle_blink(self) -> None:
+        try:
+            # Only blink when focused; otherwise keep off
+            if not self.hasFocus():
+                self._cursor_on = False
+                return
+            self._cursor_on = not self._cursor_on
+            self.viewport().update()
+        except Exception:
+            pass

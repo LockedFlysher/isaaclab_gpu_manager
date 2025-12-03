@@ -564,7 +564,7 @@ class MonitorPage(QWidget):
         self.mode_docker_btn = QToolButton(); self.mode_docker_btn.setText("Docker"); self.mode_docker_btn.setCheckable(True)
         try:
             self.mode_conda_btn.setToolTip("主机模式（Conda）")
-            self.mode_docker_btn.setToolTip("容器模式（Docker/Compose）")
+            self.mode_docker_btn.setToolTip("容器模式（Docker）")
             self.mode_conda_btn.setAutoRaise(True); self.mode_docker_btn.setAutoRaise(True)
         except Exception:
             pass
@@ -589,27 +589,12 @@ class MonitorPage(QWidget):
             self.use_docker_cb.setToolTip("切换到容器模式（与 Conda 互斥）。")
         except Exception:
             pass
-        self.docker_combo = QComboBox(); self.docker_combo.setEditable(False); self.docker_combo.setMinimumWidth(200)
+        self.docker_combo = QComboBox(); self.docker_combo.setEditable(True); self.docker_combo.setMinimumWidth(200)
         try:
-            self.docker_combo.setToolTip("运行中的容器列表（docker ps）。")
+            self.docker_combo.setToolTip("运行中的容器（docker ps）。可手动输入容器名或模板（如 isaac-lab-nhb-$(whoami)）。")
         except Exception:
             pass
         self.docker_refresh = QPushButton("Refresh containers")
-        self.use_compose_cb = QCheckBox("Compose")
-        try:
-            self.use_compose_cb.setToolTip("使用 docker compose 模式（服务名=compose.yml 中 services 的键名）。")
-        except Exception:
-            pass
-        self.compose_dir_edit = QLineEdit(); self.compose_dir_edit.setPlaceholderText("/path/to/compose dir (e.g. ~/PycharmProjects/.../docker)")
-        try:
-            self.compose_dir_edit.setToolTip("compose.yml/docker-compose.yml 所在目录。")
-        except Exception:
-            pass
-        self.compose_service_edit = QLineEdit(); self.compose_service_edit.setPlaceholderText("service name (e.g. isaac-lab-nhb)")
-        try:
-            self.compose_service_edit.setToolTip("Compose 服务名（services: 下的键名），不是容器名/镜像名。")
-        except Exception:
-            pass
         crow = QHBoxLayout();
         # Left: conda env selector
         self._lbl_conda = QLabel("Conda")
@@ -621,16 +606,14 @@ class MonitorPage(QWidget):
         crow.addWidget(self.docker_combo, 1)
         crow.addSpacing(12)
         # Middle: compose path/service
-        crow.addWidget(self.use_compose_cb)
-        crow.addWidget(self.compose_dir_edit, 1)
-        crow.addWidget(self.compose_service_edit, 1)
+        # Compose controls removed; container entry uses explicit container name
         # Right: put Refresh at the far right
         crow.addStretch(1)
         # Hint: use a small '?' tool button with tooltip instead of inline text
         try:
             self._hint_btn = QToolButton()
             self._hint_btn.setText("?")
-            self._hint_btn.setToolTip("容器下拉仅显示运行中的容器；Compose 的服务名 = compose.yml 中 services 的键名（非容器名/镜像名）。")
+            self._hint_btn.setToolTip("容器下拉仅显示运行中的容器；也可手动输入容器名，例如 isaac-lab-nhb-$(whoami)。")
             try:
                 self._hint_btn.setAutoRaise(True)
             except Exception:
@@ -682,14 +665,13 @@ class MonitorPage(QWidget):
         lr_split.setStretchFactor(0, 1); lr_split.setStretchFactor(1, 1)
         r_v.addWidget(lr_split, 1)
 
-        # Preview + Run
-        # Preview header + per-command list with copy buttons
-        self.run_btn = QPushButton("Run")
+        # Preview (copy-only here); actual Run moved to Console tab per request
+        self.run_btn = QPushButton("Run")  # keep attribute for backward code paths; not added to layout
         try:
             self.run_btn.setObjectName("primaryButton")
         except Exception:
             pass
-        ph = QHBoxLayout(); ph.addWidget(QLabel("Preview")); ph.addStretch(1); ph.addWidget(self.run_btn)
+        ph = QHBoxLayout(); ph.addWidget(QLabel("Preview")); ph.addStretch(1)
         r_v.addLayout(ph)
         self.preview_area = QWidget(); self.preview_vbox = QVBoxLayout(self.preview_area)
         try:
@@ -706,16 +688,66 @@ class MonitorPage(QWidget):
         rt_l.addWidget(runner_box, 1)
         # Console tab (interactive shell)
         console_tab = QWidget(); ct_l = QVBoxLayout(console_tab)
+        # Preview header + per-command list with run/copy in Console tab
+        cph = QHBoxLayout();
+        cph.addWidget(QLabel("Preview"))
+        cph.addSpacing(12)
+        self.console_profile_label = QLabel("Preset")
+        self.console_profile_combo = QComboBox(); self.console_profile_combo.setEditable(False); self.console_profile_combo.setMinimumWidth(200)
+        cph.addWidget(self.console_profile_label)
+        cph.addWidget(self.console_profile_combo)
+        cph.addStretch(1)
+        self.console_run_all_btn = QPushButton("Run All")
+        cph.addWidget(self.console_run_all_btn)
+        ct_l.addLayout(cph)
+        # Share model with Runner preset combo and keep selection in sync
+        try:
+            self.console_profile_combo.setModel(self.preset_combo.model())
+            # Initial sync
+            try:
+                self.console_profile_combo.setCurrentText(self.preset_combo.currentText())
+            except Exception:
+                pass
+            # Bidirectional selection sync
+            self.console_profile_combo.currentTextChanged.connect(lambda _=None: self.preset_combo.setCurrentText(self.console_profile_combo.currentText()))
+            self.preset_combo.currentTextChanged.connect(lambda _=None: self.console_profile_combo.setCurrentText(self.preset_combo.currentText()))
+        except Exception:
+            pass
+        # Container shell one-liner (rendered as a row identical to preview rows)
+        self.container_shell_row = QWidget()
+        csh = QHBoxLayout(self.container_shell_row)
+        try:
+            csh.setContentsMargins(0, 0, 0, 0)
+            csh.setSpacing(0)
+        except Exception:
+            pass
+        self.container_shell_edit = QLineEdit(); self.container_shell_edit.setReadOnly(True)
+        self.container_shell_copy = QPushButton("复制")
+        self.container_shell_run = QPushButton("运行")
+        csh.addWidget(self.container_shell_edit, 1)
+        csh.addWidget(self.container_shell_run)
+        csh.addWidget(self.container_shell_copy)
+        self.console_preview_area = QWidget(); self.console_preview_vbox = QVBoxLayout(self.console_preview_area)
+        try:
+            self.console_preview_vbox.setContentsMargins(0, 0, 0, 0)
+            self.console_preview_vbox.setSpacing(0)
+        except Exception:
+            pass
+        # Put the container one-liner as the first row inside preview area for identical spacing
+        try:
+            self.console_preview_vbox.addWidget(self.container_shell_row)
+        except Exception:
+            pass
+        ct_l.addWidget(self.console_preview_area)
+        # Console controls
         cons_ctrl = QHBoxLayout()
         self.console_open_btn = QPushButton("Open Host Shell")
-        self.console_compose_btn = QPushButton("Compose Shell")
         # Split controls
         self.console_split_h_btn = QPushButton("Split H")
         self.console_split_v_btn = QPushButton("Split V")
         self.console_close_btn = QPushButton("Close")
         self.console_clear_btn = QPushButton("Clear")
         cons_ctrl.addWidget(self.console_open_btn)
-        cons_ctrl.addWidget(self.console_compose_btn)
         cons_ctrl.addWidget(self.console_split_h_btn)
         cons_ctrl.addWidget(self.console_split_v_btn)
         cons_ctrl.addStretch(1)
@@ -758,28 +790,77 @@ class MonitorPage(QWidget):
             self.docker_refresh.hide()
         except Exception:
             pass
-        # Compose wiring
-        self.use_compose_cb.toggled.connect(lambda _=None: self.preview_update_req.emit())
-        # Also adjust visibility when toggling compose
-        try:
-            self.use_compose_cb.toggled.connect(lambda _=None: self._apply_runner_mode_visibility())
-        except Exception:
-            pass
         # Initialize mode visibility once
         try:
             self._apply_runner_mode_visibility()
         except Exception:
             pass
-        self.compose_dir_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
-        self.compose_service_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
         # Console wiring (delegated to MainWindow)
         try:
             self.console_open_btn.clicked.connect(lambda: getattr(self._mw, '_open_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_console_shell') else None)
-            self.console_compose_btn.clicked.connect(lambda: getattr(self._mw, '_open_compose_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_compose_shell') else None)
+            # Container shell one-liner actions
+            self.container_shell_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.container_shell_edit.text()))
+            self.container_shell_run.clicked.connect(lambda: getattr(self._mw, '_run_preview_command')(self.container_shell_edit.text()) if getattr(self, '_mw', None) and hasattr(self._mw, '_run_preview_command') else None)
             self.console_close_btn.clicked.connect(lambda: getattr(self._mw, '_close_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_close_console_shell') else None)
             self.console_clear_btn.clicked.connect(lambda: self.console_area.clear_active())
             self.console_split_h_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Horizontal))
             self.console_split_v_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Vertical))
+        except Exception:
+            pass
+
+    def set_console_preview_commands(self, cmds: list[str]) -> None:
+        """Render per-command preview rows inside Console tab with run+copy controls."""
+        try:
+            layout = self.console_preview_vbox
+        except Exception:
+            return
+        try:
+            # Keep the first row if it is the container one-liner; clear others
+            keep0 = False
+            try:
+                keep0 = layout.count() > 0 and layout.itemAt(0).widget() is self.container_shell_row
+            except Exception:
+                keep0 = False
+            start = 1 if keep0 else 0
+            for i in range(layout.count() - 1, start - 1, -1):
+                it = layout.takeAt(i)
+                w = it.widget()
+                if w is not None:
+                    w.deleteLater()
+            layout.setSpacing(0)
+        except Exception:
+            pass
+        # Avoid duplicating the container shell one-liner: skip it in the list if present
+        try:
+            container_cmd = self.container_shell_edit.text().strip()
+        except Exception:
+            container_cmd = ""
+        for cmd in (cmds or []):
+            if container_cmd and cmd.strip() == container_cmd:
+                continue
+            row = QHBoxLayout()
+            try:
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(0)
+            except Exception:
+                pass
+            le = QLineEdit(); le.setReadOnly(True); le.setText(cmd)
+            btn_run = QPushButton("运行")
+            btn_copy = QPushButton("复制")
+            try:
+                btn_run.clicked.connect(lambda _=False, t=cmd: (hasattr(self, '_mw') and hasattr(self._mw, '_run_preview_command')) and self._mw._run_preview_command(t))
+                btn_copy.clicked.connect(lambda _=False, t=cmd: QApplication.clipboard().setText(t))
+            except Exception:
+                pass
+            row.addWidget(le, 1)
+            row.addWidget(btn_run)
+            row.addWidget(btn_copy)
+            w = QWidget(); w.setLayout(row)
+            layout.addWidget(w)
+
+    def set_container_shell_command(self, cmd: str) -> None:
+        try:
+            self.container_shell_edit.setText(cmd or "")
         except Exception:
             pass
         # Preset buttons are wired in MainWindow for lifecycle
@@ -922,11 +1003,6 @@ class MonitorPage(QWidget):
             self.conda_combo.setVisible(not d)
             # Docker controls
             self.docker_combo.setVisible(d)
-            self.use_compose_cb.setVisible(d)
-            # Compose fields only visible when both docker and compose toggled
-            comp_on = d and bool(self.use_compose_cb.isChecked())
-            self.compose_dir_edit.setVisible(comp_on)
-            self.compose_service_edit.setVisible(comp_on)
             if hasattr(self, '_hint_btn'):
                 self._hint_btn.setVisible(d)
             # Sync toggle buttons visual state
@@ -1321,6 +1397,8 @@ class MainWindow(QMainWindow):
         self._host_params: Dict[str, Any] = {}
         # Console sessions: map each TerminalWidget to its SSHInteractiveShell
         self._console_shells: Dict[TerminalWidget, SSHInteractiveShell] = {}
+        # Auto-open host console only once on first switch to Console tab
+        self._console_auto_opened: bool = False
 
         # Pages
         self.stack = QStackedWidget()
@@ -1357,12 +1435,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.login_page.profile_combo.currentTextChanged.connect(self._load_profile_into_fields)
-        # Runner actions
-        self.monitor_page.run_btn.clicked.connect(self._run_runner)
+        # Runner actions: removed Run button per requirement (Console handles Run)
         self.monitor_page.conda_combo.currentTextChanged.connect(lambda _=None: self._update_runner_preview())
         try:
-            self.monitor_page.docker_combo.currentTextChanged.connect(lambda _=None: self._update_runner_preview())
-            self.monitor_page.use_docker_cb.toggled.connect(lambda _=None: self._update_runner_preview())
+            # Update preview and persist runner when container changes
+            self.monitor_page.docker_combo.currentTextChanged.connect(lambda _=None: (self._update_runner_preview(), self._autosave_runner()))
+            # Persist runner when docker mode toggles
+            self.monitor_page.use_docker_cb.toggled.connect(lambda _=None: (self._update_runner_preview(), self._autosave_runner()))
+        except Exception:
+            pass
+        # Run all preview commands in console (button lives in Console tab)
+        try:
+            self.monitor_page.console_run_all_btn.clicked.connect(self._run_preview_all)
+        except Exception:
+            pass
+        # Console profile change updates its own preview
+        try:
+            self.monitor_page.console_profile_combo.currentTextChanged.connect(lambda _=None: self._update_console_preview())
         except Exception:
             pass
         self.monitor_page.script_edit.textChanged.connect(lambda _=None: self._update_runner_preview())
@@ -1377,11 +1466,23 @@ class MainWindow(QMainWindow):
             self.monitor_page.preset_save.clicked.connect(self._save_preset)
             self.monitor_page.preset_load.clicked.connect(self._load_preset_into_ui)
             self.monitor_page.preset_del.clicked.connect(self._delete_preset)
+            # Keep Console preset selection in sync when Runner preset name changes
+            self.monitor_page.preset_combo.currentTextChanged.connect(lambda _=None: self._sync_console_preset_from_runner())
+        except Exception:
+            pass
+        # Auto-open Host Console when switching to Console tab (first time only)
+        try:
+            self.monitor_page.main_tabs._bar.currentChanged.connect(self._on_main_tab_changed)
         except Exception:
             pass
 
         # Load profiles
         self._refresh_profiles()
+        # Initial Console preview for selected preset (shared with Runner preset combo)
+        try:
+            self._update_console_preview()
+        except Exception:
+            pass
         # Load preset names once
         try:
             self._refresh_presets()
@@ -1634,23 +1735,82 @@ class MainWindow(QMainWindow):
                 self.status.showMessage(f"Console send failed: {e}", 5000)
             except Exception:
                 pass
-
-    def _open_compose_shell(self) -> None:
-        # Ensure console is open for the active pane
+    
+    def _on_main_tab_changed(self, idx: int) -> None:
+        """Auto-open host console only on the first time user switches to Console tab."""
+        try:
+            if idx != 2:
+                return
+            if self._console_auto_opened:
+                return
+            # Only open if no session exists yet to avoid disturbing running commands
+            if not self._console_shells:
+                self._open_console_shell()
+            self._console_auto_opened = True
+        except Exception:
+            pass
+    def _run_preview_command(self, cmd: str) -> None:
+        """Ensure console open in active pane, then send a single command line."""
+        if not cmd:
+            return
         t = self.monitor_page.console_area.active_terminal()
         if t not in self._console_shells:
             self._open_console_shell()
-            QThread.msleep(200)  # small delay until connected
-        r = self._collect_runner()
-        if not r.get("use_compose"):
-            self.status.showMessage("Compose not enabled; fill dir/service and toggle Compose", 5000)
-        compose_dir = (r.get("compose_dir") or "").strip()
-        compose_service = (r.get("compose_service") or "").strip()
-        if not compose_dir or not compose_service:
-            QMessageBox.warning(self, "Compose", "Please fill Compose dir and service in Runner")
+            # Send after a brief delay to allow session to appear
+            try:
+                QTimer.singleShot(250, lambda: self._send_console_line(cmd))
+            except Exception:
+                pass
+        else:
+            self._send_console_line(cmd)
+
+    def _run_preview_all(self) -> None:
+        """Send all preview commands to the console sequentially for the active pane."""
+        try:
+            r = self._console_runner()
+            cmds = self._build_preview_commands(r)
+        except Exception:
+            cmds = []
+        if not cmds:
+            self.status.showMessage("No commands to run", 3000)
             return
-        cmd = f"cd {compose_dir} && docker compose exec {compose_service} bash -l"
-        # No local echo; command itself will run in the console session
+        # Ensure console is open
+        t = self.monitor_page.console_area.active_terminal()
+        need_open = t not in self._console_shells
+        if need_open:
+            self._open_console_shell()
+        # Schedule with small gaps; add a longer wait after entering interactive shell
+        delay = 250 if need_open else 0
+        for i, c in enumerate(cmds):
+            try:
+                QTimer.singleShot(delay, lambda cc=c: self._send_console_line(cc))
+            except Exception:
+                pass
+            # Heuristic: if we just sent an interactive shell entry, wait longer
+            if 'docker exec -it' in c:
+                delay += 800
+            else:
+                delay += 200
+
+    
+
+    def _open_docker_shell(self) -> None:
+        """Open an interactive shell into a specific container using docker exec.
+
+        Uses the container name exactly as typed/selected in Runner's Docker container field.
+        Supports patterns like isaac-lab-nhb-$(whoami). The command is sent verbatim to remote shell
+        so $(whoami) expands server-side.
+        """
+        # Ensure console is open
+        t = self.monitor_page.console_area.active_terminal()
+        if t not in self._console_shells:
+            self._open_console_shell()
+            QThread.msleep(200)
+        r = self._console_runner()
+        cmd = self._container_enter_cmd(r)
+        if not cmd:
+            self.status.showMessage("Please select or type a container name in Runner", 5000)
+            return
         self._send_console_line(cmd)
 
     def _close_console_shell(self) -> None:
@@ -1771,9 +1931,9 @@ class MainWindow(QMainWindow):
         conda_env = self.monitor_page.conda_combo.currentText().strip()
         use_docker = bool(self.monitor_page.use_docker_cb.isChecked())
         docker_container = self.monitor_page.docker_combo.currentText().strip()
-        use_compose = bool(getattr(self.monitor_page, 'use_compose_cb', None) and self.monitor_page.use_compose_cb.isChecked())
-        compose_dir = self.monitor_page.compose_dir_edit.text().strip() if hasattr(self.monitor_page, 'compose_dir_edit') else ""
-        compose_service = self.monitor_page.compose_service_edit.text().strip() if hasattr(self.monitor_page, 'compose_service_edit') else ""
+        use_compose = False
+        compose_dir = ""
+        compose_service = ""
         script = self.monitor_page.script_edit.text().strip()
         # params
         params = []
@@ -1798,9 +1958,7 @@ class MainWindow(QMainWindow):
             "conda_env": conda_env,
             "use_docker": use_docker,
             "docker_container": docker_container,
-            "use_compose": use_compose,
-            "compose_dir": compose_dir,
-            "compose_service": compose_service,
+            # compose fields removed
             "script": script,
             "params": params,
             "env": env,
@@ -1828,6 +1986,7 @@ class MainWindow(QMainWindow):
             cmds = self._build_preview_commands(r)
             if hasattr(self.monitor_page, 'set_preview_commands'):
                 self.monitor_page.set_preview_commands(cmds)
+            # Do not override Console preview: it follows Console's selected preset
             else:
                 # Fallback: show as concatenated text if legacy widget present
                 try:
@@ -1840,22 +1999,76 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _console_selected_preset(self) -> str:
+        try:
+            return (self.monitor_page.console_profile_combo.currentText() or "").strip()
+        except Exception:
+            return ""
+
+    def _console_runner(self) -> Dict[str, Any]:
+        """Return runner dict for the selected console preset; fallback to current UI."""
+        name = self._console_selected_preset()
+        if name:
+            try:
+                r = config_store.load_runner_preset(self._config, name)
+                if r:
+                    return r
+            except Exception:
+                pass
+        return self._collect_runner()
+
+    def _update_console_preview(self) -> None:
+        """Rebuild Console preview based on selected profile's saved runner config."""
+        try:
+            r = self._console_runner()
+            cmds = self._build_preview_commands(r)
+            # Set the one-liner first so the list can skip duplicates reliably
+            try:
+                if hasattr(self.monitor_page, 'set_container_shell_command'):
+                    self.monitor_page.set_container_shell_command(self._container_enter_cmd(r))
+            except Exception:
+                pass
+            if hasattr(self.monitor_page, 'set_console_preview_commands'):
+                self.monitor_page.set_console_preview_commands(cmds)
+        except Exception:
+            pass
+
+    def _sync_console_preset_from_runner(self) -> None:
+        """If the Runner preset name exists, select it in Console and refresh preview."""
+        try:
+            name = (self.monitor_page.preset_combo.currentText() or '').strip()
+            if not name:
+                return
+            # If present in Console list, select it and update preview
+            cb = self.monitor_page.console_profile_combo
+            idx = cb.findText(name)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+                self._update_console_preview()
+        except Exception:
+            pass
+
     def _build_preview_commands(self, r: Dict[str, Any]) -> list[str]:
         """Return ordered shell commands without comments for the preview list."""
         import shlex as _sh
         env_dict = {k: v for k, v in r.get("env", [])}
         use_docker = bool(r.get("use_docker"))
-        docker_container = (r.get("docker_container") or "").strip() if use_docker else ""
-        use_compose = bool(r.get("use_compose"))
-        compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
-        compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
+        # Always read container name
+        docker_container = (r.get("docker_container") or "").strip()
         # container vs conda: mutually exclusive
-        conda_env = "" if (use_docker or use_compose) else (r.get("conda_env") or "").strip()
+        conda_env = "" if use_docker else (r.get("conda_env") or "").strip()
 
         base_py = self._build_python_cmd(r)
 
-        def _env_exports_lines() -> list[str]:
-            return [f"export {k}={_sh.quote(str(v))}" for k, v in env_dict.items()]
+        def _env_inline_prefix() -> str:
+            # Build inline KEY=VAL pairs so the python command is self-contained
+            pairs = []
+            for k, v in env_dict.items():
+                k = str(k).strip()
+                if not k:
+                    continue
+                pairs.append(f"{k}={_sh.quote(str(v))}")
+            return " ".join(pairs)
 
         def _conda_lines() -> list[str]:
             if not conda_env:
@@ -1866,32 +2079,42 @@ class MainWindow(QMainWindow):
             ]
 
         cmds: list[str] = []
-        if use_compose and compose_dir and compose_service:
-            cmds += [
-                f"cd {_sh.quote(compose_dir)}",
-                f"docker compose exec {_sh.quote(compose_service)} bash -l",
-            ]
-            cmds += _env_exports_lines()
-            cmds.append(base_py)
-            return cmds
-
+        # Container flow (docker): prefer docker exec with explicit container name
         if use_docker and docker_container:
-            cmds += [f"docker exec -it {_sh.quote(docker_container)} bash -l"]
-            cmds += _env_exports_lines()
-            cmds.append(base_py)
+            # Do NOT quote container name to allow $(whoami) style patterns to expand remotely
+            cmds += [f"docker exec -it {docker_container} bash -l"]
+            env_prefix = _env_inline_prefix()
+            py_line = f"{env_prefix} {base_py}" if env_prefix else base_py
+            cmds.append(py_line)
             return cmds
 
         if use_docker and not docker_container:
             cmds += ["docker exec -it <container> bash -l"]
-            cmds += _env_exports_lines()
-            cmds.append(base_py)
+            env_prefix = _env_inline_prefix()
+            py_line = f"{env_prefix} {base_py}" if env_prefix else base_py
+            cmds.append(py_line)
             return cmds
 
-        # host conda or system python
+        # host conda or system python: inline env with python so it doesn't depend on previous lines
         cmds += _conda_lines()
-        cmds += _env_exports_lines()
-        cmds.append(base_py)
+        env_prefix = _env_inline_prefix()
+        py_line = f"{env_prefix} {base_py}" if env_prefix else base_py
+        cmds.append(py_line)
         return cmds
+
+    def _container_enter_cmd(self, r: Dict[str, Any]) -> str:
+        """Return the one-liner to enter container (
+        docker exec -it <container> bash -l) based on Runner fields.
+        Do not quote container name to allow $(whoami) expansions.
+        Return empty string if not applicable.
+        """
+        try:
+            name = (r.get('docker_container') or '').strip()
+            if r.get('use_docker') and name:
+                return f"docker exec -it {name} bash -l"
+        except Exception:
+            pass
+        return ""
 
     def _run_runner(self) -> None:
         hp = self._host_params
@@ -1906,17 +2129,10 @@ class MainWindow(QMainWindow):
         env_dict = {k: v for k, v in r.get("env", [])}
         base = self._build_python_cmd(r)
         use_docker = bool(r.get("use_docker"))
-        docker_container = (r.get("docker_container") or "").strip() if use_docker else ""
-        use_compose = bool(r.get("use_compose"))
-        compose_dir = (r.get("compose_dir") or "").strip() if use_compose else ""
-        compose_service = (r.get("compose_service") or "").strip() if use_compose else ""
+        # Always read container name
+        docker_container = (r.get("docker_container") or "").strip()
 
-        if use_compose and compose_dir and compose_service:
-            # Compose 模式：在宿主机 cd 到目录，再进入服务 shell 执行命令
-            import shlex as _sh
-            inner_in_container = SSHCommandJob.build_inner(env=env_dict, conda_env=None, base_cmd=base, docker_container=None)
-            inner = f"cd {_sh.quote(compose_dir)} && docker compose exec {_sh.quote(compose_service)} bash -l -c {_sh.quote(inner_in_container)}"
-        elif use_docker and docker_container:
+        if use_docker and docker_container:
             # Docker 模式：通过 docker exec 在容器内执行（不使用 conda）
             inner = SSHCommandJob.build_inner(env=env_dict, conda_env=None, base_cmd=base, docker_container=docker_container)
         else:
@@ -1934,7 +2150,10 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Run started…", 3000)
         except Exception:
             pass
-        self.monitor_page.run_btn.setEnabled(False)
+        try:
+            self.monitor_page.run_btn.setEnabled(False)
+        except Exception:
+            pass
         # Do not stream job output into interactive Console; print to stdout instead
         job.line.connect(lambda s: (sys.stdout.write(s.rstrip("\n")+"\n"), sys.stdout.flush()))
         job.error.connect(lambda m: (sys.stdout.write(("[error] "+(m or "")).rstrip("\n")+"\n"), sys.stdout.flush()))
@@ -1943,7 +2162,10 @@ class MainWindow(QMainWindow):
                 self.status.showMessage(f"Run finished (rc={rc})", 5000)
             except Exception:
                 pass
-            self.monitor_page.run_btn.setEnabled(True)
+            try:
+                self.monitor_page.run_btn.setEnabled(True)
+            except Exception:
+                pass
         job.finished.connect(_done)
         job.setParent(self)
         job.start()
@@ -2130,12 +2352,54 @@ class MainWindow(QMainWindow):
         job = DockerContainerListJob(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"))
         def _on_res(names: list) -> None:
             try:
+                # Preserve user-typed name if not in list
+                cur = self.monitor_page.docker_combo.currentText().strip()
+                self.monitor_page.docker_combo.blockSignals(True)
                 self.monitor_page.docker_combo.clear()
                 self.monitor_page.docker_combo.addItems(names or [])
+                if cur:
+                    # If user had a typed pattern, restore it
+                    if cur not in (names or []):
+                        try:
+                            self.monitor_page.docker_combo.setEditText(cur)
+                        except Exception:
+                            self.monitor_page.docker_combo.setCurrentText(cur)
+                    else:
+                        self.monitor_page.docker_combo.setCurrentText(cur)
+                else:
+                    # No current selection: if only one candidate exists, pick it; else try pick one that includes remote username
+                    try:
+                        hp_user = (self._host_params or {}).get('username') or ''
+                        pick = ''
+                        if names and len(names) == 1:
+                            pick = names[0]
+                        elif hp_user:
+                            # Prefer exact suffix -<user>, fallback contains user
+                            for n in names:
+                                if n.endswith('-' + hp_user):
+                                    pick = n; break
+                            if not pick:
+                                for n in names:
+                                    if hp_user in n:
+                                        pick = n; break
+                        if pick:
+                            self.monitor_page.docker_combo.setCurrentText(pick)
+                    except Exception:
+                        pass
+                self.monitor_page.docker_combo.blockSignals(False)
                 self.status.showMessage(f"Docker containers detected: {len(names)}", 5000)
                 # Print to terminal for visibility
                 sys.stdout.write("[docker-detect] containers: %s\n" % (", ".join(names) if names else "<none>"))
                 sys.stdout.flush()
+                # Update preview/one-liner and persist selection if changed silently
+                try:
+                    self._update_runner_preview()
+                except Exception:
+                    pass
+                try:
+                    self._autosave_runner()
+                except Exception:
+                    pass
             except Exception:
                 pass
         def _on_err(m: str) -> None:
@@ -2182,13 +2446,6 @@ class MainWindow(QMainWindow):
             self.monitor_page.conda_combo.setCurrentText(r.get("conda_env", ""))
             self.monitor_page.use_docker_cb.setChecked(bool(r.get("use_docker", False)))
             self.monitor_page.docker_combo.setCurrentText(r.get("docker_container", ""))
-            # Compose fields
-            if hasattr(self.monitor_page, 'use_compose_cb'):
-                self.monitor_page.use_compose_cb.setChecked(bool(r.get("use_compose", False)))
-            if hasattr(self.monitor_page, 'compose_dir_edit'):
-                self.monitor_page.compose_dir_edit.setText(r.get("compose_dir", ""))
-            if hasattr(self.monitor_page, 'compose_service_edit'):
-                self.monitor_page.compose_service_edit.setText(r.get("compose_service", ""))
             self.monitor_page.script_edit.setText(r.get("script", ""))
             # params
             self.monitor_page.params_table.setRowCount(0)
@@ -2223,6 +2480,11 @@ class MainWindow(QMainWindow):
             cb.blockSignals(False)
         except Exception:
             pass
+        # Update Console preset visibility (shared model)
+        try:
+            self.monitor_page.update_console_preset_visibility()
+        except Exception:
+            pass
 
     def _save_preset(self) -> None:
         name = self.monitor_page.preset_combo.currentText().strip()
@@ -2236,8 +2498,14 @@ class MainWindow(QMainWindow):
             self._autosave_runner(r)
         except Exception:
             pass
-        self.status.showMessage(f"Saved preset '{name}' (compose={bool(r.get('use_compose'))})")
+        self.status.showMessage(f"Saved preset '{name}'")
         self._refresh_presets()
+        # If Console currently selects this preset, refresh its preview
+        try:
+            if (self.monitor_page.console_profile_combo.currentText() or '').strip() == name:
+                self._update_console_preview()
+        except Exception:
+            pass
 
     def _load_preset_into_ui(self) -> None:
         name = self.monitor_page.preset_combo.currentText().strip()
@@ -2249,6 +2517,12 @@ class MainWindow(QMainWindow):
             return
         self._apply_runner_fields(r)
         self.status.showMessage(f"Loaded preset '{name}' into UI", 4000)
+        # If Console selects the same preset, refresh preview for consistency
+        try:
+            if (self.monitor_page.console_profile_combo.currentText() or '').strip() == name:
+                self._update_console_preview()
+        except Exception:
+            pass
 
     def _delete_preset(self) -> None:
         name = self.monitor_page.preset_combo.currentText().strip()
@@ -2259,6 +2533,12 @@ class MainWindow(QMainWindow):
             config_store.delete_runner_preset(self._config, name)
             self._refresh_presets()
             self.status.showMessage(f"Deleted preset '{name}'", 4000)
+            # If Console selected this preset, update preview to reflect removal
+            try:
+                if (self.monitor_page.console_profile_combo.currentText() or '').strip() == name:
+                    self._update_console_preview()
+            except Exception:
+                pass
 
 
 def main() -> None:
@@ -2328,3 +2608,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Console helpers for profile list -----------------------------------
+    def update_console_preset_visibility(self) -> None:
+        try:
+            vis = self.preset_combo.count() > 0
+            self.console_profile_label.setVisible(vis)
+            self.console_profile_combo.setVisible(vis)
+        except Exception:
+            pass
