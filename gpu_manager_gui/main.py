@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 import shlex
 import subprocess
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent, QTimer
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QApplication,
@@ -287,6 +287,179 @@ class TopTabs(QWidget):
         return self
 
 
+class ConsoleArea(QWidget):
+    """Container that supports multiple TerminalWidget panes with split.
+
+    - Keeps track of the currently focused terminal (active pane).
+    - Allows splitting the active pane horizontally or vertically.
+    """
+    def __init__(self) -> None:
+        super().__init__()
+        self._root: QWidget = TerminalWidget()
+        self._active: TerminalWidget = self._root  # type: ignore[assignment]
+        self._v = QVBoxLayout(self)
+        try:
+            self._v.setContentsMargins(0, 0, 0, 0)
+            self._v.setSpacing(0)
+        except Exception:
+            pass
+        self._v.addWidget(self._root)
+        self._hook_terminal(self._root)  # type: ignore[arg-type]
+
+    # Public API ----------------------------------------------------------
+    def active_terminal(self) -> TerminalWidget:
+        return self._active
+
+    def focus_active(self) -> None:
+        try:
+            self._active.setFocus()
+        except Exception:
+            pass
+
+    def clear_active(self) -> None:
+        try:
+            self._active.clear()
+        except Exception:
+            pass
+
+    def split_active(self, orientation: Qt.Orientation) -> TerminalWidget:
+        tgt = self._active
+        # If root is a plain terminal, replace root with a splitter
+        if self._root is tgt:
+            sp = QSplitter(orientation)
+            # Remove terminal from layout and set new root
+            try:
+                self._v.removeWidget(self._root)
+            except Exception:
+                pass
+            self._root.setParent(None)
+            sp.addWidget(tgt)
+            new_term = TerminalWidget()
+            sp.addWidget(new_term)
+            self._hook_terminal(new_term)
+            self._root = sp
+            self._v.addWidget(sp)
+            # Equalize sizes after layout settles
+            self._equalize_later(sp)
+            self._active = new_term
+            try:
+                new_term.setFocus()
+            except Exception:
+                pass
+            return new_term
+        # Otherwise, find the direct parent splitter and replace tgt with a nested splitter
+        parent, idx = self._find_parent_splitter(self._root, tgt)
+        if parent is None or idx < 0:
+            # Fallback: cannot find (shouldn't happen); no-op by creating a sibling in a horizontal splitter at root
+            sp = QSplitter(orientation)
+            try:
+                self._v.removeWidget(self._root)
+            except Exception:
+                pass
+            self._root.setParent(None)
+            sp.addWidget(tgt)
+            new_term = TerminalWidget()
+            sp.addWidget(new_term)
+            self._hook_terminal(new_term)
+            self._root = sp
+            self._v.addWidget(sp)
+            self._equalize_later(sp)
+            self._active = new_term
+            try:
+                new_term.setFocus()
+            except Exception:
+                pass
+            return new_term
+        nested = QSplitter(orientation)
+        # Insert nested splitter at index, and detach tgt from parent
+        try:
+            # Qt >= 5.13 has replaceWidget; try it first
+            if hasattr(parent, "replaceWidget"):
+                parent.replaceWidget(idx, nested)
+            else:
+                parent.insertWidget(idx, nested)
+                # Old tgt shifted to idx+1; detach it
+                try:
+                    w = parent.widget(idx + 1)
+                    if w is tgt:
+                        w.setParent(None)
+                except Exception:
+                    pass
+        except Exception:
+            # Fallback: insert and detach by index logic
+            parent.insertWidget(idx, nested)
+            try:
+                w = parent.widget(idx + 1)
+                if w is tgt:
+                    w.setParent(None)
+            except Exception:
+                pass
+        # Build two panes: original tgt and a new terminal
+        nested.addWidget(tgt)
+        new_term = TerminalWidget()
+        nested.addWidget(new_term)
+        self._hook_terminal(new_term)
+        self._equalize_later(nested)
+        self._active = new_term
+        try:
+            new_term.setFocus()
+        except Exception:
+            pass
+        return new_term
+
+    # Internals -----------------------------------------------------------
+    def _hook_terminal(self, term: TerminalWidget) -> None:
+        # Track focus to know the active pane
+        try:
+            term.installEventFilter(self)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, ev):  # type: ignore[override]
+        # Update active terminal when a pane gains focus
+        try:
+            if isinstance(obj, TerminalWidget) and ev.type() == QEvent.Type.FocusIn:
+                self._active = obj
+        except Exception:
+            pass
+        return super().eventFilter(obj, ev)
+
+    def _find_parent_splitter(self, node: QWidget, target: QWidget):
+        # Return (QSplitter, index) that directly contains target; (None, -1) if not found
+        from PyQt6.QtWidgets import QSplitter as _QS
+        if isinstance(node, _QS):
+            for i in range(node.count()):
+                w = node.widget(i)
+                if w is target:
+                    return node, i
+                res_p, res_i = self._find_parent_splitter(w, target)
+                if res_p is not None:
+                    return res_p, res_i
+        return None, -1
+
+    def _equalize_later(self, sp: 'QSplitter') -> None:
+        # After the event loop processes layout, set equal sizes and stretch
+        try:
+            def _do():
+                try:
+                    n = sp.count()
+                    if n <= 0:
+                        return
+                    # Set equal stretch so future resizes distribute evenly
+                    for i in range(n):
+                        try:
+                            sp.setStretchFactor(i, 1)
+                        except Exception:
+                            pass
+                    # Equal sizes; using equal numbers gives equal ratios
+                    sp.setSizes([1] * n)
+                except Exception:
+                    pass
+            QTimer.singleShot(0, _do)
+        except Exception:
+            pass
+
+
 class MonitorPage(QWidget):
     disconnect_requested = pyqtSignal()
     # Signals to bubble actions to MainWindow (works even if parent chain changes)
@@ -536,13 +709,22 @@ class MonitorPage(QWidget):
         cons_ctrl = QHBoxLayout()
         self.console_open_btn = QPushButton("Open Host Shell")
         self.console_compose_btn = QPushButton("Compose Shell")
+        # Split controls
+        self.console_split_h_btn = QPushButton("Split H")
+        self.console_split_v_btn = QPushButton("Split V")
         self.console_close_btn = QPushButton("Close")
         self.console_clear_btn = QPushButton("Clear")
-        cons_ctrl.addWidget(self.console_open_btn); cons_ctrl.addWidget(self.console_compose_btn)
-        cons_ctrl.addStretch(1); cons_ctrl.addWidget(self.console_clear_btn); cons_ctrl.addWidget(self.console_close_btn)
+        cons_ctrl.addWidget(self.console_open_btn)
+        cons_ctrl.addWidget(self.console_compose_btn)
+        cons_ctrl.addWidget(self.console_split_h_btn)
+        cons_ctrl.addWidget(self.console_split_v_btn)
+        cons_ctrl.addStretch(1)
+        cons_ctrl.addWidget(self.console_clear_btn)
+        cons_ctrl.addWidget(self.console_close_btn)
         ct_l.addLayout(cons_ctrl)
-        self.terminal = TerminalWidget()
-        ct_l.addWidget(self.terminal, 1)
+        # Multi-console area with split support
+        self.console_area = ConsoleArea()
+        ct_l.addWidget(self.console_area, 1)
 
         self.main_tabs.addTab(monitor_tab, "Monitor")
         self.main_tabs.addTab(runner_tab, "Runner")
@@ -595,7 +777,9 @@ class MonitorPage(QWidget):
             self.console_open_btn.clicked.connect(lambda: getattr(self._mw, '_open_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_console_shell') else None)
             self.console_compose_btn.clicked.connect(lambda: getattr(self._mw, '_open_compose_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_compose_shell') else None)
             self.console_close_btn.clicked.connect(lambda: getattr(self._mw, '_close_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_close_console_shell') else None)
-            self.console_clear_btn.clicked.connect(self.terminal.clear)
+            self.console_clear_btn.clicked.connect(lambda: self.console_area.clear_active())
+            self.console_split_h_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Horizontal))
+            self.console_split_v_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Vertical))
         except Exception:
             pass
         # Preset buttons are wired in MainWindow for lifecycle
@@ -1135,8 +1319,8 @@ class MainWindow(QMainWindow):
         self._test_threads: list[ConnectTester] = []
         self._bg_jobs: list[QThread] = []
         self._host_params: Dict[str, Any] = {}
-        # Console session holder
-        self._console_shell = None
+        # Console sessions: map each TerminalWidget to its SSHInteractiveShell
+        self._console_shells: Dict[TerminalWidget, SSHInteractiveShell] = {}
 
         # Pages
         self.stack = QStackedWidget()
@@ -1243,6 +1427,15 @@ class MainWindow(QMainWindow):
             self._poller.requestInterruption()
             self._poller.wait(500)
             self._poller = None
+        # Stop all console shells
+        try:
+            for sh in list(getattr(self, '_console_shells', {}).values()):
+                try:
+                    sh.stop_shell()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return super().closeEvent(event)
 
     def _begin_connect(self, host: str, port: int, username: Optional[str], identity: Optional[str], password: Optional[str], interval: float) -> None:
@@ -1310,11 +1503,30 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Connect failed")
 
     def _disconnect(self) -> None:
+        # Save current runner config for this host before disconnecting
+        try:
+            self._autosave_runner()
+        except Exception:
+            pass
         if self._poller is not None:
             self._poller.stop()
             self._poller.requestInterruption()
             self._poller.wait(1000)
             self._poller = None
+        # Close all console shells on disconnect
+        try:
+            for t, sh in list(getattr(self, '_console_shells', {}).items()):
+                try:
+                    sh.stop_shell()
+                except Exception:
+                    pass
+                try:
+                    t.detach_shell()
+                except Exception:
+                    pass
+            self._console_shells.clear()
+        except Exception:
+            pass
         self.stack.setCurrentIndex(0)
         self.setWindowTitle("IsaacLab GPU Manager")
         self.status.showMessage("Disconnected")
@@ -1358,8 +1570,12 @@ class MainWindow(QMainWindow):
 
     # Console shell helpers -----------------------------------------------
     def _open_console_shell(self) -> None:
-        if self._console_shell is not None:
-            self.status.showMessage("Console already open", 3000)
+        term = getattr(self.monitor_page, 'console_area', None)
+        if term is None:
+            return
+        t = self.monitor_page.console_area.active_terminal()
+        if t in self._console_shells:
+            self.status.showMessage("Console already open (this pane)", 3000)
             return
         hp = self._host_params
         if not hp:
@@ -1370,60 +1586,61 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Console", str(e) or "failed to create shell")
             return
-        self._console_shell = shell
-        # Keep Console clean; avoid local echo here
+        self._console_shells[t] = shell
+        # Attach shell to this terminal and wire signals
         try:
-            self.monitor_page.terminal.attach_shell(shell)
+            t.attach_shell(shell)
         except Exception:
             pass
-        shell.data.connect(self.monitor_page.terminal.feed)
-        shell.error.connect(lambda m: self.monitor_page.terminal.local_echo(f"[console:error] {m}"))
+        shell.data.connect(t.feed)
+        shell.error.connect(lambda m, _t=t: _t.local_echo(f"[console:error] {m}"))
         shell.connected.connect(lambda: self.status.showMessage("Console connected", 3000))
         try:
-            shell.connected.connect(lambda: self.monitor_page.terminal.send_resize())
+            shell.connected.connect(lambda _t=t: _t.send_resize())
         except Exception:
             pass
-        def _closed():
+        def _closed(_t=t):
             self.status.showMessage("Console closed", 3000)
-            self._console_shell = None
             try:
-                self.monitor_page.terminal.detach_shell()
+                if _t in self._console_shells:
+                    self._console_shells.pop(_t, None)
+                _t.detach_shell()
             except Exception:
                 pass
         shell.closed.connect(_closed)
         shell.start()
-        # Focus console tab
+        # Focus console tab and this pane
         try:
             self.monitor_page.main_tabs._bar.setCurrentIndex(2)  # TopTabs bar index
         except Exception:
             pass
         try:
-            self.monitor_page.terminal.setFocus()
+            self.monitor_page.console_area.focus_active()
         except Exception:
             pass
 
     def _send_console_line(self, text: str) -> None:
         if not text:
             return
-        sh = self._console_shell
+        t = self.monitor_page.console_area.active_terminal()
+        sh = self._console_shells.get(t)
         if sh is None:
-            self.status.showMessage("Console not open", 3000)
+            self.status.showMessage("Console not open (this pane)", 3000)
             return
         try:
             sh.send_line(text)
         except Exception as e:
-            # Show send error in status bar only
             try:
                 self.status.showMessage(f"Console send failed: {e}", 5000)
             except Exception:
                 pass
 
     def _open_compose_shell(self) -> None:
-        # Ensure console is open
-        if self._console_shell is None:
+        # Ensure console is open for the active pane
+        t = self.monitor_page.console_area.active_terminal()
+        if t not in self._console_shells:
             self._open_console_shell()
-            # Will run compose after connected; simple delay
-            QThread.msleep(200)
+            QThread.msleep(200)  # small delay until connected
         r = self._collect_runner()
         if not r.get("use_compose"):
             self.status.showMessage("Compose not enabled; fill dir/service and toggle Compose", 5000)
@@ -1437,18 +1654,20 @@ class MainWindow(QMainWindow):
         self._send_console_line(cmd)
 
     def _close_console_shell(self) -> None:
-        sh = self._console_shell
+        t = self.monitor_page.console_area.active_terminal()
+        sh = self._console_shells.get(t)
         if sh is None:
-            self.status.showMessage("Console already closed", 3000)
+            self.status.showMessage("Console already closed (this pane)", 3000)
             return
         try:
             sh.stop_shell()
         except Exception:
             pass
         try:
-            self.monitor_page.terminal.detach_shell()
+            t.detach_shell()
         except Exception:
             pass
+        self._console_shells.pop(t, None)
 
     # Fallback UI update if MonitorPage lacks update_snapshot (defensive)
     def _update_snapshot_fallback(self, snap: Snapshot) -> None:

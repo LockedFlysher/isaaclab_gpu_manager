@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 try:
     import yaml  # type: ignore
@@ -141,6 +141,30 @@ def load_runner(cfg: Dict[str, Any], key: str, mode: str) -> Dict[str, Any]:
     r.setdefault("use_compose", False)
     r.setdefault("compose_dir", "")
     r.setdefault("compose_service", "")
+    # Backward/robust compatibility: accept dicts or mixed forms for params/env
+    def _to_kv_list(x: Any) -> List[List[str]]:
+        res: List[List[str]] = []
+        if isinstance(x, dict):
+            for k, v in x.items():
+                res.append([str(k), "" if v is None else str(v)])
+            return res
+        if isinstance(x, list):
+            for it in x:
+                if isinstance(it, (list, tuple)):
+                    if not it:
+                        continue
+                    k = it[0]
+                    v = it[1] if len(it) > 1 else ""
+                    res.append([str(k), "" if v is None else str(v)])
+                elif isinstance(it, dict):
+                    for k, v in it.items():
+                        res.append([str(k), "" if v is None else str(v)])
+                elif isinstance(it, str) and "=" in it:
+                    k, v = it.split("=", 1)
+                    res.append([k.strip(), v])
+        return res
+    r["params"] = _to_kv_list(r.get("params", []))
+    r["env"] = _to_kv_list(r.get("env", []))
     return r
 
 
@@ -180,6 +204,30 @@ def load_runner_preset(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
     p.setdefault("use_compose", False)
     p.setdefault("compose_dir", "")
     p.setdefault("compose_service", "")
+    # Normalize legacy/mixed formats for params/env
+    def _to_kv_list(x: Any) -> List[List[str]]:
+        res: List[List[str]] = []
+        if isinstance(x, dict):
+            for k, v in x.items():
+                res.append([str(k), "" if v is None else str(v)])
+            return res
+        if isinstance(x, list):
+            for it in x:
+                if isinstance(it, (list, tuple)):
+                    if not it:
+                        continue
+                    k = it[0]
+                    v = it[1] if len(it) > 1 else ""
+                    res.append([str(k), "" if v is None else str(v)])
+                elif isinstance(it, dict):
+                    for k, v in it.items():
+                        res.append([str(k), "" if v is None else str(v)])
+                elif isinstance(it, str) and "=" in it:
+                    k, v = it.split("=", 1)
+                    res.append([k.strip(), v])
+        return res
+    p["params"] = _to_kv_list(p.get("params", []))
+    p["env"] = _to_kv_list(p.get("env", []))
     return p
 
 
