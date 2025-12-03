@@ -697,8 +697,6 @@ class MonitorPage(QWidget):
         cph.addWidget(self.console_profile_label)
         cph.addWidget(self.console_profile_combo)
         cph.addStretch(1)
-        self.console_run_all_btn = QPushButton("Run All")
-        cph.addWidget(self.console_run_all_btn)
         ct_l.addLayout(cph)
         # Share model with Runner preset combo and keep selection in sync
         try:
@@ -1444,11 +1442,7 @@ class MainWindow(QMainWindow):
             self.monitor_page.use_docker_cb.toggled.connect(lambda _=None: (self._update_runner_preview(), self._autosave_runner()))
         except Exception:
             pass
-        # Run all preview commands in console (button lives in Console tab)
-        try:
-            self.monitor_page.console_run_all_btn.clicked.connect(self._run_preview_all)
-        except Exception:
-            pass
+        # Run-all button removed per requirement; users run commands per-line
         # Console profile change updates its own preview
         try:
             self.monitor_page.console_profile_combo.currentTextChanged.connect(lambda _=None: self._update_console_preview())
@@ -1468,6 +1462,8 @@ class MainWindow(QMainWindow):
             self.monitor_page.preset_del.clicked.connect(self._delete_preset)
             # Keep Console preset selection in sync when Runner preset name changes
             self.monitor_page.preset_combo.currentTextChanged.connect(lambda _=None: self._sync_console_preset_from_runner())
+            # Persist last selected preset when user changes selection text
+            self.monitor_page.preset_combo.currentTextChanged.connect(lambda name: self._set_last_runner_preset(name))
         except Exception:
             pass
         # Auto-open Host Console when switching to Console tab (first time only)
@@ -2033,6 +2029,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _set_last_runner_preset(self, name: str) -> None:
+        try:
+            name = (name or '').strip()
+            if not name:
+                return
+            self._config["last_runner_preset"] = name
+            config_store.save_config(self._config)
+        except Exception:
+            pass
+
     def _sync_console_preset_from_runner(self) -> None:
         """If the Runner preset name exists, select it in Console and refresh preview."""
         try:
@@ -2475,8 +2481,12 @@ class MainWindow(QMainWindow):
             cb.clear()
             for n in names:
                 cb.addItem(n)
-            if cur:
-                cb.setEditText(cur)
+            # Prefer last used preset if available
+            last = (self._config.get("last_runner_preset") or "").strip()
+            if last and last in names:
+                cb.setCurrentText(last)
+            elif cur:
+                cb.setCurrentText(cur)
             cb.blockSignals(False)
         except Exception:
             pass
@@ -2493,6 +2503,12 @@ class MainWindow(QMainWindow):
             return
         r = self._collect_runner()
         config_store.save_runner_preset(self._config, name, r)
+        # Remember last used preset
+        try:
+            self._config["last_runner_preset"] = name
+            config_store.save_config(self._config)
+        except Exception:
+            pass
         # Also persist current runner for the connected host so Save acts as an explicit save.
         try:
             self._autosave_runner(r)
@@ -2515,6 +2531,12 @@ class MainWindow(QMainWindow):
         if not r:
             QMessageBox.warning(self, "Preset", f"Preset '{name}' not found")
             return
+        # Remember last used preset
+        try:
+            self._config["last_runner_preset"] = name
+            config_store.save_config(self._config)
+        except Exception:
+            pass
         self._apply_runner_fields(r)
         self.status.showMessage(f"Loaded preset '{name}' into UI", 4000)
         # If Console selects the same preset, refresh preview for consistency
@@ -2531,6 +2553,13 @@ class MainWindow(QMainWindow):
         resp = QMessageBox.question(self, "Delete preset", f"Delete preset '{name}'?")
         if resp == QMessageBox.StandardButton.Yes:
             config_store.delete_runner_preset(self._config, name)
+            # Clear last if it pointed to deleted name
+            try:
+                if self._config.get("last_runner_preset") == name:
+                    self._config["last_runner_preset"] = ""
+                    config_store.save_config(self._config)
+            except Exception:
+                pass
             self._refresh_presets()
             self.status.showMessage(f"Deleted preset '{name}'", 4000)
             # If Console selected this preset, update preview to reflect removal

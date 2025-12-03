@@ -26,6 +26,7 @@ def _default_config() -> Dict[str, Any]:
         "profiles": {},
         "runners": {},           # per-host+mode saved state
         "runner_presets": {},     # named, host-agnostic presets
+        "last_runner_preset": "", # remember last selected runner preset name
     }
 
 
@@ -46,6 +47,7 @@ def load_config() -> Dict[str, Any]:
         data.setdefault("profiles", {})
         data.setdefault("runners", {})
         data.setdefault("runner_presets", {})
+        data.setdefault("last_runner_preset", "")
         if not isinstance(data["profiles"], dict):
             data["profiles"] = {}
         if not isinstance(data["runners"], dict):
