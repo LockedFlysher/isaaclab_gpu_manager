@@ -443,8 +443,8 @@ class MonitorPage(QWidget):
         crow.addWidget(self._lbl_conda)
         crow.addWidget(self.conda_combo, 1)
         crow.addSpacing(12)
-        # Middle: docker + container
-        crow.addWidget(self.use_docker_cb)
+        # Middle: docker container
+        # (hidden checkbox still controls logic; toggled by mode buttons)
         crow.addWidget(self.docker_combo, 1)
         crow.addSpacing(12)
         # Middle: compose path/service
@@ -581,6 +581,11 @@ class MonitorPage(QWidget):
         # Also adjust visibility when toggling compose
         try:
             self.use_compose_cb.toggled.connect(lambda _=None: self._apply_runner_mode_visibility())
+        except Exception:
+            pass
+        # Initialize mode visibility once
+        try:
+            self._apply_runner_mode_visibility()
         except Exception:
             pass
         self.compose_dir_edit.textChanged.connect(lambda _=None: self.preview_update_req.emit())
@@ -728,7 +733,8 @@ class MonitorPage(QWidget):
             d = False
         try:
             # Conda controls
-            self._lbl_conda.setVisible(not d)
+            if hasattr(self, '_lbl_conda'):
+                self._lbl_conda.setVisible(not d)
             self.conda_combo.setVisible(not d)
             # Docker controls
             self.docker_combo.setVisible(d)
@@ -739,6 +745,12 @@ class MonitorPage(QWidget):
             self.compose_service_edit.setVisible(comp_on)
             if hasattr(self, '_hint_btn'):
                 self._hint_btn.setVisible(d)
+            # Sync toggle buttons visual state
+            try:
+                self.mode_conda_btn.blockSignals(True); self.mode_conda_btn.setChecked(not d); self.mode_conda_btn.blockSignals(False)
+                self.mode_docker_btn.blockSignals(True); self.mode_docker_btn.setChecked(d); self.mode_docker_btn.blockSignals(False)
+            except Exception:
+                pass
         except Exception:
             pass
 
