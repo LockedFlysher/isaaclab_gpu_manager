@@ -858,7 +858,14 @@ class MonitorPage(QWidget):
 
     def set_container_shell_command(self, cmd: str) -> None:
         try:
-            self.container_shell_edit.setText(cmd or "")
+            cmd = cmd or ""
+            self.container_shell_edit.setText(cmd)
+            # Hide the container row when not applicable (e.g., conda/host mode)
+            visible = bool(cmd.strip())
+            try:
+                self.container_shell_row.setVisible(visible)
+            except Exception:
+                pass
         except Exception:
             pass
         # Preset buttons are wired in MainWindow for lifecycle
@@ -2076,13 +2083,18 @@ class MainWindow(QMainWindow):
                 pairs.append(f"{k}={_sh.quote(str(v))}")
             return " ".join(pairs)
 
-        def _conda_lines() -> list[str]:
+        def _conda_line() -> str:
             if not conda_env:
-                return []
-            return [
-                "for p in \"$HOME/miniconda3/etc/profile.d/conda.sh\" \"$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; do [ -f \"$p\" ] && . \"$p\" && break; done",
-                f"conda activate {_sh.quote(conda_env)}",
-            ]
+                return ""
+            # Combine sourcing conda.sh and activation into one self-contained line
+            # Treat installer-dir names as 'base' and fallback to base if the named env is missing.
+            env_q = _sh.quote(conda_env)
+            return (
+                "for p in \"$HOME/miniconda3/etc/profile.d/conda.sh\" \"$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; "
+                "do [ -f \"$p\" ] && . \"$p\" && break; done; "
+                f"ENV={env_q}; case \"$ENV\" in miniconda3|anaconda3|miniforge3|mambaforge|micromamba|\"\") ENV=base;; esac; "
+                "conda activate \"$ENV\" 2>/dev/null || conda activate base 2>/dev/null"
+            )
 
         cmds: list[str] = []
         # Container flow (docker): prefer docker exec with explicit container name
@@ -2102,7 +2114,9 @@ class MainWindow(QMainWindow):
             return cmds
 
         # host conda or system python: inline env with python so it doesn't depend on previous lines
-        cmds += _conda_lines()
+        cl = _conda_line()
+        if cl:
+            cmds.append(cl)
         env_prefix = _env_inline_prefix()
         py_line = f"{env_prefix} {base_py}" if env_prefix else base_py
         cmds.append(py_line)
