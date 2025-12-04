@@ -960,8 +960,18 @@ class MainWindow(QMainWindow):
             cb.blockSignals(False)
         except Exception:
             pass
+        # Keep Console preset in sync even if we suppressed runner signals above
+        try:
+            cc = self.monitor_page.console_profile_combo
+            cc.blockSignals(True)
+            cc.setCurrentText(self.monitor_page.preset_combo.currentText())
+            cc.blockSignals(False)
+        except Exception:
+            pass
         try:
             self.monitor_page.update_console_preset_visibility()
+            # Refresh Console preview to reflect selected preset
+            self._update_console_preview()
         except Exception:
             pass
 
