@@ -34,6 +34,9 @@
    ```bash
    python -m gpu_manager_gui.main
    ```
+3. 图标（可选）：
+   - 应用内置 SVG 图标：gpu_manager_gui/assets/icon.svg，已在启动时自动加载。
+   - 如需自定义，可替换该文件或在 `gpu_manager_gui/main.py` 中修改图标路径。
 
 > 需要：
 > - 远程服务器已安装 `nvidia-smi`（NVIDIA 驱动）

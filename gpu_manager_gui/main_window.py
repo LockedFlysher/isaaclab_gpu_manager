@@ -102,7 +102,12 @@ class MainWindow(QMainWindow):
         self._host_params: Dict[str, Any] = {}
         self._console_shells: Dict[TerminalWidget, SSHInteractiveShell] = {}
         self._console_auto_opened: bool = False
-        self._reverse_tunnel: ReverseTunnelJob | None = None
+        self._reverse_tunnel: ReverseTunnelParamikoJob | None = None
+        # Ensure graceful shutdown on app exit
+        try:
+            QApplication.instance().aboutToQuit.connect(self._graceful_shutdown)  # type: ignore[arg-type]
+        except Exception:
+            pass
 
         # Pages
         self.stack = QStackedWidget()
@@ -358,6 +363,10 @@ class MainWindow(QMainWindow):
             j.stop_tunnel()
         except Exception:
             pass
+        try:
+            j.wait(2000)
+        except Exception:
+            pass
 
     def _disconnect(self) -> None:
         if self._poller is not None:
@@ -365,6 +374,11 @@ class MainWindow(QMainWindow):
                 self._poller.stop()
             except Exception:
                 pass
+        try:
+            if self._poller is not None:
+                self._poller.wait(1500)
+        except Exception:
+            pass
         self._poller = None
         self._host_params = {}
         try:
@@ -942,6 +956,94 @@ class MainWindow(QMainWindow):
                     pass
         job.finished.connect(_done)
         job.start()
+
+    # Graceful shutdown of threads to avoid 'QThread destroyed while running'
+    def _graceful_shutdown(self) -> None:
+        # Stop reverse tunnel
+        try:
+            if self._reverse_tunnel is not None:
+                self._reverse_tunnel.stop_tunnel()
+                try:
+                    self._reverse_tunnel.wait(2000)
+                except Exception:
+                    pass
+                self._reverse_tunnel = None
+        except Exception:
+            pass
+        # Stop console shells
+        try:
+            for sh in list(self._console_shells.values()):
+                try:
+                    sh.stop_shell()
+                except Exception:
+                    pass
+                try:
+                    sh.wait(1500)
+                except Exception:
+                    pass
+            self._console_shells.clear()
+        except Exception:
+            pass
+        # Stop poller
+        try:
+            if self._poller is not None:
+                self._poller.stop()
+                try:
+                    self._poller.wait(1500)
+                except Exception:
+                    pass
+                self._poller = None
+        except Exception:
+            pass
+        # Stop background jobs
+        try:
+            for t in list(self._bg_jobs):
+                try:
+                    if hasattr(t, 'requestInterruption'):
+                        t.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    t.quit()
+                except Exception:
+                    pass
+                try:
+                    t.wait(1000)
+                except Exception:
+                    pass
+            self._bg_jobs.clear()
+        except Exception:
+            pass
+        # Stop test threads
+        try:
+            for t in list(self._test_threads):
+                try:
+                    if hasattr(t, 'requestInterruption'):
+                        t.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    t.quit()
+                except Exception:
+                    pass
+                try:
+                    t.wait(1000)
+                except Exception:
+                    pass
+            self._test_threads.clear()
+        except Exception:
+            pass
+
+    # Ensure shutdown on window close
+    def closeEvent(self, ev):  # type: ignore[override]
+        try:
+            self._graceful_shutdown()
+        except Exception:
+            pass
+        try:
+            super().closeEvent(ev)
+        except Exception:
+            pass
 
 
     def _on_conda_envs(self, envs: list[str]) -> None:

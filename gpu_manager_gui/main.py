@@ -6,6 +6,7 @@ import threading
 import re
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QIcon
 
 # Support both `python -m gpu_manager_gui.main` and direct script run
 try:
@@ -81,7 +82,47 @@ def main() -> None:
         )
     except Exception:
         pass
+    # App icon (SVG)
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base, "assets", "icon.svg")
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
+
     w = MainWindow()
+    # Also set window icon explicitly (some platforms prefer per-window icon)
+    try:
+        if os.path.exists(icon_path):
+            w.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
+
+    # macOS Dock icon: use PyObjC if available to set application icon at runtime
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSImage, NSApplication  # type: ignore
+            # Render QIcon -> PNG temp file and feed to NSImage
+            from PyQt6.QtGui import QPixmap
+            import tempfile
+            if os.path.exists(icon_path):
+                ico = QIcon(icon_path)
+                pm = ico.pixmap(512, 512)
+                tmp = tempfile.NamedTemporaryFile(prefix="isaaclab_icon_", suffix=".png", delete=False)
+                try:
+                    pm.save(tmp.name, "PNG")
+                    img = NSImage.alloc().initWithContentsOfFile_(tmp.name)
+                    if img is not None:
+                        NSApplication.sharedApplication().setApplicationIconImage_(img)
+                finally:
+                    try:
+                        tmp.close()
+                    except Exception:
+                        pass
+        except Exception:
+            # PyObjC not available; Dock icon may remain default when not bundled as .app
+            pass
     w.show()
     sys.exit(app.exec())
 

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Background circle -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2d7ef7"/>
+      <stop offset="100%" stop-color="#1e6de6"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#bg)"/>
+
+  <!-- GPU chip body -->
+  <rect x="64" y="64" width="128" height="128" rx="14" ry="14" fill="#ffffff" opacity="0.95"/>
+
+  <!-- Pins (top/bottom) -->
+  <g fill="#ffffff" opacity="0.95">
+    <rect x="84" y="48" width="12" height="18" rx="3"/>
+    <rect x="112" y="48" width="12" height="18" rx="3"/>
+    <rect x="140" y="48" width="12" height="18" rx="3"/>
+    <rect x="168" y="48" width="12" height="18" rx="3"/>
+
+    <rect x="84" y="190" width="12" height="18" rx="3"/>
+    <rect x="112" y="190" width="12" height="18" rx="3"/>
+    <rect x="140" y="190" width="12" height="18" rx="3"/>
+    <rect x="168" y="190" width="12" height="18" rx="3"/>
+  </g>
+
+  <!-- Inner core -->
+  <rect x="90" y="90" width="76" height="76" rx="10" ry="10" fill="#2d7ef7" opacity="0.18"/>
+
+  <!-- Lightning bolt (performance) -->
+  <path d="M132 94 l-36 48 h22 l-6 28 l36 -48 h-22 z" fill="#2d7ef7" opacity="0.95"/>
+
+  <!-- Subtle shine -->
+  <ellipse cx="96" cy="88" rx="68" ry="28" fill="#ffffff" opacity="0.12"/>
+</svg>
+
