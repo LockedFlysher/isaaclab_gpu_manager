@@ -15,6 +15,7 @@ def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_c
     # If docker is selected, wrap with docker exec; conda settings are ignored in this case
     if docker_container:
         # Container mode is exclusive with conda. Try python variants only.
+        # Intentionally DO NOT quote container name to allow shell expansion like $(whoami)
         import shlex as _sh
         py_call_q = _sh.quote(cmd)
         env_prefix_q = _sh.quote(exports) if exports else ""
@@ -30,7 +31,7 @@ def _compose_inner_command(env: Dict[str, str], conda_env: Optional[str], base_c
             "if [ \"$ok\" -eq 0 ]; then echo '[docker-run] python not found in container' 1>&2; exit 127; fi"
         )
         # Use login shell (-l) to pick up /etc/profile and system PATH adjustments
-        return f"docker exec -i {_sh.quote(docker_container)} bash -l -c {_sh.quote(inner_script)}"
+        return f"docker exec -i {docker_container} bash -l -c {_sh.quote(inner_script)}"
     if conda_env:
         # Prefer conda run; fallback to activation via conda.sh
         run = f"conda run -n {shlex.quote(conda_env)} --no-capture-output {cmd}"

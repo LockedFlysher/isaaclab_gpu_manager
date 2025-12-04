@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QTabBar,
 )
 from PyQt6.QtCharts import QChart, QChartView, QPieSeries
-from PyQt6.QtWidgets import QTabWidget, QPlainTextEdit, QTableWidget, QTableWidgetItem, QPushButton, QDialog, QListWidget, QListWidgetItem
+from PyQt6.QtWidgets import QDialog, QListWidget, QListWidgetItem
 
 # Support both `python -m gpu_manager_gui.main` and direct script run
 try:
@@ -915,6 +915,19 @@ class MonitorPage(QWidget):
         except Exception:
             pass
 
+    def update_console_preset_visibility(self) -> None:
+        """Show/hide the Console preset selector when presets exist.
+
+        This was previously left as a stray nested function at module bottom;
+        make it a real method so MainWindow can call it safely.
+        """
+        try:
+            vis = self.preset_combo.count() > 0
+            self.console_profile_label.setVisible(vis)
+            self.console_profile_combo.setVisible(vis)
+        except Exception:
+            pass
+
     def set_console_preview_commands(self, cmds: list[str]) -> None:
         """Render per-command preview rows inside Console tab with run+copy controls."""
         try:
@@ -1008,6 +1021,10 @@ class MonitorPage(QWidget):
 
     def _on_browse_script(self) -> None:
         # Ask MainWindow to open remote file dialog, since it holds SSH params
+        # Prefer using back-reference _mw; fallback to parent() if needed
+        if getattr(self, '_mw', None) is not None and hasattr(self._mw, '_browse_remote_script'):
+            self._mw._browse_remote_script()
+            return
         p = self.parent()
         if p and hasattr(p, "_browse_remote_script"):
             getattr(p, "_browse_remote_script")()
@@ -1352,82 +1369,6 @@ class RemoteFileDialog(QDialog):
         job.setParent(self)
         job.start()
 
-    def _add_row(self, table: QTableWidget) -> None:
-        row = table.rowCount()
-        table.insertRow(row)
-        table.setItem(row, 0, QTableWidgetItem(""))
-        table.setItem(row, 1, QTableWidgetItem(""))
-
-    def _del_selected(self, table: QTableWidget) -> None:
-        for idx in sorted({i.row() for i in table.selectedIndexes()}, reverse=True):
-            table.removeRow(idx)
-
-    def update_snapshot(self, snap: 'Snapshot') -> None:
-        rows = len(snap.gpus)
-        self.gpu_table.setRowCount(rows)
-        procs_per_uuid = {}
-        for app in snap.apps:
-            procs_per_uuid[app.gpu_uuid] = procs_per_uuid.get(app.gpu_uuid, 0) + 1
-        for r, g in enumerate(snap.gpus):
-            idx_item = QTableWidgetItem(str(g.index))
-            idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.gpu_table.setItem(r, 0, idx_item)
-            name_item = QTableWidgetItem(g.name)
-            self.gpu_table.setItem(r, 1, name_item)
-            util_item = QTableWidgetItem(f"{g.util_percent}%")
-            util_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.gpu_table.setItem(r, 2, util_item)
-            prog = QProgressBar()
-            prog.setRange(0, max(1, g.mem_total_mib))
-            prog.setValue(g.mem_used_mib)
-            prog.setFormat(f"{g.mem_used_mib} / {g.mem_total_mib} MiB")
-            self.gpu_table.setCellWidget(r, 3, prog)
-            n_procs = procs_per_uuid.get(g.uuid, 0)
-            procs_item = QTableWidgetItem(str(n_procs))
-            procs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.gpu_table.setItem(r, 4, procs_item)
-
-        # Build pie based on TOTAL VRAM across all GPUs, not just used-by-users
-        base_total = sum(max(0, g.mem_total_mib) for g in snap.gpus)
-        used_total = sum(max(0, g.mem_used_mib) for g in snap.gpus)
-        user_totals = dict(snap.user_vram_mib)
-        used_by_users = sum(max(0, v) for v in user_totals.values())
-
-        # System/other = driver/reserved/video memory not attributed to a user
-        system_other = max(0.0, float(used_total) - float(used_by_users))
-        free_rest = max(0.0, float(base_total) - float(used_total))
-
-        series = QPieSeries()
-        series.setLabelsVisible(True)
-
-        # Users first (sorted desc)
-        if user_totals:
-            for user, mib in sorted(user_totals.items(), key=lambda kv: kv[1], reverse=True):
-                val = max(0.01, float(mib))
-                series.append(f"{user} ({int(mib)} MiB)", val)
-        # Then system/other (only if non-zero)
-        if system_other > 0.5:
-            series.append(f"system/other ({int(system_other)} MiB)", system_other)
-        # Finally free rest to ensure the whole circle equals total VRAM
-        if base_total <= 0:
-            # No GPUs? show idle placeholder
-            series.append("idle", 1)
-        elif free_rest > 0.5:
-            series.append(f"free ({int(free_rest)} MiB)", free_rest)
-
-        chart = QChart()
-        chart.addSeries(series)
-        chart.setTitle("VRAM Total = users + system + free (MiB)")
-        chart.legend().setVisible(True)
-        chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
-        chart.setAnimationOptions(QChart.AnimationOption.NoAnimation)
-        self.chart_view.setChart(chart)
-
-    # Runner wiring helpers ----------------------------------------------
-    def get_mode(self) -> str:
-        # Mode tabs removed; always return single default mode
-        return "default"
-
 
 
 class ConnectTester(QThread):
@@ -1766,6 +1707,36 @@ class MainWindow(QMainWindow):
     def _on_error(self, msg: str) -> None:
         if msg:
             self.status.showMessage(msg, 5000)
+
+    # Remote file browse (Runner script) ----------------------------------
+    def _browse_remote_script(self) -> None:
+        """Open a simple remote file dialog to pick a .py script on the server.
+
+        Requires an active connection (uses current SSH params). On success,
+        fills Runner's script field and refreshes the preview.
+        """
+        hp = self._host_params
+        if not hp:
+            QMessageBox.warning(self, "Not connected", "Please connect first")
+            return
+        try:
+            dlg = RemoteFileDialog(hp, self)
+        except Exception as e:
+            QMessageBox.critical(self, "Browse", str(e) or "failed to open dialog")
+            return
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            path = dlg.selected_path().strip()
+            if path:
+                try:
+                    self.monitor_page.script_edit.setText(path)
+                except Exception:
+                    pass
+                # Save runner state and refresh preview
+                try:
+                    self._autosave_runner()
+                except Exception:
+                    pass
+                self._update_runner_preview()
 
     def _log_debug(self, text: str) -> None:
         # Avoid polluting the interactive Console; log to stdout only
@@ -2779,11 +2750,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    # Console helpers for profile list -----------------------------------
-    def update_console_preset_visibility(self) -> None:
-        try:
-            vis = self.preset_combo.count() > 0
-            self.console_profile_label.setVisible(vis)
-            self.console_profile_combo.setVisible(vis)
-        except Exception:
-            pass

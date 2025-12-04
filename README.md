@@ -1,19 +1,28 @@
 # IsaacLab GPU Manager (Qt)
 
-一个用 Python + Qt (PyQt6 + QtCharts) 实现的小工具，通过 SSH 每 5 秒轮询 `nvidia-smi` 来获取服务器的 GPU 利用率、显存占用，并根据用户汇总显存占用生成饼图。
+一个用 Python + Qt (PyQt6 + QtCharts) 实现的小工具，通过 SSH 每 5 秒轮询 `nvidia-smi` 来获取服务器的 GPU 利用率、显存占用，并根据用户汇总显存占用生成饼图。内置“Runner + Console”，可一键在远端 Conda 环境或 Docker 容器内运行 Python 脚本，并通过交互式 SSH 控制台查看/分屏。
 
 ## 功能
-- SSH 到远程服务器（使用本机 `ssh` 命令，无需额外依赖 Paramiko）
-- 支持密码或密钥登录：
-  - 若填写密码，使用 Paramiko 建立长连接（推荐）
-  - 未填写密码时，默认使用系统 `ssh`（BatchMode），也支持指定私钥
-- 每 5 秒轮询：
-  - `nvidia-smi --query-gpu=...` 获取 GPU 列表、利用率、显存
-  - `nvidia-smi --query-compute-apps=...` 获取占用显存的进程
-  - `ps -o pid=,user= -p ...` 映射 PID 到用户名
-- 左侧表格：GPU 指标（利用率、显存进度条、进程数量）
-- 右侧饼图：按用户汇总的显存占用（MiB）
-- YAML 保存连接历史：自动填充上一次连接配置；可从下拉列表快速选择历史连接，一键登录。
+- 远程监控
+  - 通过本机 `ssh`（或 Paramiko 密码模式）每 5 秒轮询：
+    - `nvidia-smi --query-gpu=...` GPU 列表、利用率、显存
+    - `nvidia-smi --query-compute-apps=...` 进程显存占用 + `ps` 映射用户名
+  - 左侧表格：GPU 指标（利用率、显存进度条、进程数量）
+  - 右侧饼图：按用户汇总的显存占用（MiB），并把系统/其他和空闲显存区分显示
+- Runner（运行器）
+  - 选择运行方式：主机 Conda 环境 或 Docker 容器（二者互斥）
+  - 指定脚本、`--key=value` 风格参数、`KEY=VALUE` 环境变量
+  - “Preview” 显示将要执行的每一条命令；支持逐条复制/运行
+  - 预设：保存/加载常用配置，和 Console 的预设下拉联动
+  - Docker 支持输入模板（例如 `isaac-lab-$(whoami)`），运行时在远端展开
+- Console（交互式 SSH 终端）
+  - 一键打开远端交互 Shell；支持多分屏（水平/垂直拆分）、关闭、清屏
+  - 在 Console 页也能预览/逐条运行 Runner 生成的命令
+- 登录与历史
+  - 支持密码或密钥登录：
+    - 填写密码时使用 Paramiko 建立长连接（推荐）
+    - 不填密码则走系统 `ssh`（BatchMode），也可指定私钥
+  - YAML 保存连接历史与 Runner 预设，可设为启动时自动连接
 
 ## 运行
 1. 安装依赖（建议创建虚拟环境）：
@@ -39,8 +48,9 @@
 - 监控页：仅显示 GPU 表格与用户饼图，右上角有 `Disconnect` 返回登录页。
 
 ## 说明与限制
-- 为了减少依赖，本工具每个轮询周期会执行 2~3 次 `ssh` 命令，简单可靠；如需更低开销，可后续改为长连接/多路复用（ControlMaster）或 Paramiko。
-- 用户显存饼图基于 `nvidia-smi --query-compute-apps` 列出的进程，并通过 `ps` 映射用户名；若进程瞬时退出或权限受限，可能显示为 `unknown`。
+- 轮询方式：默认使用系统 `ssh` 子进程；填写密码时改用 Paramiko 长连接。
+- 容器名模板：Runner 在 Docker 模式下不对容器名加引号，以便远端 `bash -lc` 能展开 `$(whoami)` 等模板；因此请勿在容器名中加入空格/未转义符号。
+- 用户显存饼图基于 `nvidia-smi --query-compute-apps` 并通过 `ps` 映射用户名；若进程瞬时退出或权限受限，可能显示为 `unknown`。
 - “性能”当前展示为 `utilization.gpu`（GPU 核心利用率 %）。如需功耗、频率等指标可扩展查询字段。
 
 ## 后续可选增强
