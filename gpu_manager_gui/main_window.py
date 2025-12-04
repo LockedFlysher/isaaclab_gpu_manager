@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QStatusBar, QStackedWidget, QTableWidgetItem
 
 from .ssh_worker import SSHGpuPoller, Snapshot
-from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob, SSHInteractiveShell
+from .ssh_exec import SSHCommandJob, RemoteOSInfoJob, CondaEnvListJob, SSHInteractiveShell, ReverseTunnelParamikoJob
 from .terminal_widget import TerminalWidget
 from . import config_store
 from .login_page import LoginPage
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._host_params: Dict[str, Any] = {}
         self._console_shells: Dict[TerminalWidget, SSHInteractiveShell] = {}
         self._console_auto_opened: bool = False
+        self._reverse_tunnel: ReverseTunnelJob | None = None
 
         # Pages
         self.stack = QStackedWidget()
@@ -250,7 +251,7 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"Connecting to {host}:{port}…")
         except Exception:
             pass
-        # Start poller
+        # Start poller (always SSH path; for local use host=127.0.0.1)
         try:
             p = SSHGpuPoller(host, int(port), username or None, password or None, identity or None, float(interval))
             p.snapshot_ready.connect(self._on_snapshot)
@@ -264,7 +265,7 @@ class MainWindow(QMainWindow):
             return
         # Switch to monitor
         self.stack.setCurrentIndex(1)
-        # Load remote OS info asynchronously
+        # Load OS info asynchronously (remote path covers 127.0.0.1 as well)
         self._fetch_remote_os()
         # Load runner config for this host
         self._load_runner_config()
@@ -275,6 +276,88 @@ class MainWindow(QMainWindow):
             pass
         # Prime conda/envs or docker containers
         self._refresh_runner_envs(False)
+        # Autofill Reverse Tunnel target based on current login and lock fields
+        try:
+            uh = f"{username or ''}@{host}" if (username or '').strip() else host
+            self.monitor_page.rvt_user_host.setText(uh)
+            self.monitor_page.rvt_user_host.setEnabled(False)
+            self.monitor_page.rvt_ssh_port.setValue(int(port))
+            self.monitor_page.rvt_ssh_port.setEnabled(False)
+        except Exception:
+            pass
+        # Autofill Reverse Tunnel target based on current login and lock fields
+        try:
+            uh = f"{username or ''}@{host}" if (username or '').strip() else host
+            self.monitor_page.rvt_user_host.setText(uh)
+            self.monitor_page.rvt_user_host.setEnabled(False)
+            self.monitor_page.rvt_ssh_port.setValue(int(port))
+            self.monitor_page.rvt_ssh_port.setEnabled(False)
+        except Exception:
+            pass
+
+    # Reverse tunnel controls --------------------------------------------
+    def _start_reverse_tunnel(self) -> None:
+        if self._reverse_tunnel is not None:
+            self.status.showMessage("Reverse tunnel already running", 4000)
+            return
+        ui = self.monitor_page
+        # Use current login page credentials for tunnel target
+        hp = self._host_params or {}
+        host = (hp.get("host") or "").strip()
+        if not host:
+            QMessageBox.warning(self, "Reverse Tunnel", "Please connect first")
+            return
+        user = (hp.get("username") or "").strip() or None
+        ssh_port = int(hp.get("port") or 22)
+        bind_port = int(ui.rvt_bind_port.value())
+        local_port = int(ui.rvt_local_port.value())
+        identity = None
+        try:
+            identity = (self._host_params.get("identity") or "").strip() or None
+        except Exception:
+            identity = None
+        job = ReverseTunnelParamikoJob(host, ssh_port, user, hp.get("password") or None, identity, bind_port, local_port, bind_addr="127.0.0.1")
+        def _on_started():
+            try:
+                ui.rvt_start_btn.setEnabled(False); ui.rvt_stop_btn.setEnabled(True)
+            except Exception:
+                pass
+            uh = f"{user}@{host}" if user else host
+            self.status.showMessage(f"Reverse tunnel started: -R {bind_port}:localhost:{local_port} -> {uh}:{ssh_port}")
+        def _on_stopped(rc: int):
+            try:
+                ui.rvt_start_btn.setEnabled(True); ui.rvt_stop_btn.setEnabled(False)
+            except Exception:
+                pass
+            self.status.showMessage(f"Reverse tunnel stopped (rc={rc})", 5000)
+            self._reverse_tunnel = None
+        def _on_error(m: str):
+            self.status.showMessage(m or "reverse tunnel failed", 6000)
+        def _on_dbg(s: str):
+            try:
+                sys.stdout.write(s.rstrip("\n")+"\n"); sys.stdout.flush()
+            except Exception:
+                pass
+        job.started.connect(_on_started)
+        job.stopped.connect(_on_stopped)
+        job.error.connect(_on_error)
+        try:
+            job.debug.connect(_on_dbg)
+        except Exception:
+            pass
+        job.setParent(self)
+        self._reverse_tunnel = job
+        job.start()
+
+    def _stop_reverse_tunnel(self) -> None:
+        j = self._reverse_tunnel
+        if j is None:
+            self.status.showMessage("Reverse tunnel not running", 4000)
+            return
+        try:
+            j.stop_tunnel()
+        except Exception:
+            pass
 
     def _disconnect(self) -> None:
         if self._poller is not None:
@@ -340,8 +423,7 @@ class MainWindow(QMainWindow):
         try:
             shell = SSHInteractiveShell(hp["host"], int(hp["port"]), hp.get("username"), hp.get("identity"), hp.get("password"), strip_ansi=False)
         except Exception as e:
-            QMessageBox.critical(self, "Console", str(e) or "failed to create shell")
-            return
+            QMessageBox.critical(self, "Console", str(e) or "failed to create shell"); return
         self._console_shells[t] = shell
         try:
             t.attach_shell(shell)
@@ -526,6 +608,7 @@ class MainWindow(QMainWindow):
         self._bg_jobs.append(job)
         job.finished.connect(lambda: self._bg_jobs.remove(job) if job in self._bg_jobs else None)
         job.start()
+
 
     # Unified refresh for conda/docker ------------------------------------
     def _refresh_runner_envs(self, from_click: bool = False) -> None:
@@ -860,6 +943,7 @@ class MainWindow(QMainWindow):
         job.finished.connect(_done)
         job.start()
 
+
     def _on_conda_envs(self, envs: list[str]) -> None:
         try:
             cb = self.monitor_page.conda_combo
@@ -919,6 +1003,9 @@ class MainWindow(QMainWindow):
             pass
         job.setParent(self)
         job.start()
+
+
+    # No separate local target; use host 127.0.0.1 if needed
 
     def _apply_runner_fields(self, r: Dict[str, Any]) -> None:
         try:

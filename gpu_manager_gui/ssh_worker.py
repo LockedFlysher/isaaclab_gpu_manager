@@ -245,3 +245,4 @@ class SSHGpuPoller(QThread):
             while slept < self._interval and not self._stop and not self.isInterruptionRequested():
                 time.sleep(step)
                 slept += step
+

@@ -24,11 +24,6 @@ class LoginPage(QWidget):
 
         self.profile_combo = QComboBox()
         self.profile_combo.setEditable(False)
-        self.profile_label = QLabel("Profile")
-        profile_row = QHBoxLayout()
-        profile_row.addWidget(self.profile_label)
-        profile_row.addWidget(self.profile_combo, 1)
-        vbox.addLayout(profile_row)
 
         # Single grid with two columns to keep perfect alignment
         grid = QGridLayout()
@@ -209,4 +204,4 @@ class LoginPage(QWidget):
         pw = prof.get("password") or ""
         self.pass_edit.setText(pw)
         self.remember_cb.setChecked(bool(prof.get("remember_password", False)))
-
+        # no local toggle; always enable SSH fields

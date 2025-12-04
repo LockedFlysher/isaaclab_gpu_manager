@@ -8,7 +8,7 @@ from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget, QAbstractItemView, QHeaderView,
     QProgressBar, QSplitter, QLineEdit, QComboBox, QGridLayout, QFormLayout, QTableWidgetItem, QToolButton, QApplication,
-    QCheckBox, QButtonGroup,
+    QCheckBox, QButtonGroup, QSpinBox,
 )
 from PyQt6.QtCharts import QChart, QChartView, QPieSeries
 
@@ -104,7 +104,10 @@ class MonitorPage(QWidget):
         sf = QHBoxLayout(); sf.addWidget(QLabel("Script")); sf.addWidget(self.script_edit, 1); sf.addWidget(self.script_browse); sf.addSpacing(12); sf.addWidget(self.conda_refresh)
         st_w = QWidget(); st_w.setLayout(sf)
         top_form.addWidget(st_w, 1, 0, 1, 2)
-        # Row 2: mode buttons (conda vs docker) + selectors
+        # Row 2: (reserved)
+        spacer_row = QHBoxLayout(); _sp = QWidget(); _sp.setLayout(spacer_row); _sp.setVisible(False)
+        top_form.addWidget(_sp, 2, 0, 1, 2)
+        # Row 3: mode buttons (conda vs docker) + selectors
         self.mode_conda_btn = QPushButton("Host/Conda"); self.mode_conda_btn.setCheckable(True)
         self.mode_docker_btn = QPushButton("Docker"); self.mode_docker_btn.setCheckable(True)
         # Exclusive selection
@@ -116,8 +119,8 @@ class MonitorPage(QWidget):
         self.mode_conda_btn.setChecked(True)
         mode_row = QHBoxLayout(); mode_row.addWidget(self.mode_conda_btn); mode_row.addWidget(self.mode_docker_btn); mode_row.addStretch(1)
         mode_w = QWidget(); mode_w.setLayout(mode_row)
-        top_form.addWidget(mode_w, 2, 0)
-        # Row 2 right content: Conda / Docker specific widgets
+        top_form.addWidget(mode_w, 3, 0)
+        # Row 3 right content: Conda / Docker specific widgets
         self.use_docker_cb = QCheckBox("Docker")
         try:
             self.use_docker_cb.setToolTip("切换到容器模式（与 Conda 互斥）。")
@@ -161,7 +164,7 @@ class MonitorPage(QWidget):
             pass
         crow.addWidget(self.conda_refresh)
         crow_w = QWidget(); crow_w.setLayout(crow)
-        top_form.addWidget(crow_w, 2, 1)
+        top_form.addWidget(crow_w, 3, 1)
         top_form.setColumnStretch(1, 1)
         r_v.addLayout(top_form)
 
@@ -276,6 +279,23 @@ class MonitorPage(QWidget):
         cons_ctrl.addWidget(self.console_clear_btn)
         cons_ctrl.addStretch(1)
         ct_l.addLayout(cons_ctrl)
+        # Reverse tunnel row (ssh -R)
+        rvt = QHBoxLayout()
+        rvt.addWidget(QLabel("Reverse Tunnel"))
+        self.rvt_user_host = QLineEdit(); self.rvt_user_host.setPlaceholderText("user@remote-host")
+        self.rvt_ssh_port = QSpinBox(); self.rvt_ssh_port.setRange(1, 65535); self.rvt_ssh_port.setValue(22)
+        self.rvt_bind_port = QSpinBox(); self.rvt_bind_port.setRange(1, 65535); self.rvt_bind_port.setValue(7897)
+        self.rvt_local_port = QSpinBox(); self.rvt_local_port.setRange(1, 65535); self.rvt_local_port.setValue(7897)
+        self.rvt_start_btn = QPushButton("Start")
+        self.rvt_stop_btn = QPushButton("Stop"); self.rvt_stop_btn.setEnabled(False)
+        rvt.addWidget(self.rvt_user_host, 1)
+        rvt.addWidget(QLabel("ssh port")); rvt.addWidget(self.rvt_ssh_port)
+        rvt.addWidget(QLabel("remote")); rvt.addWidget(self.rvt_bind_port)
+        rvt.addWidget(QLabel("local")); rvt.addWidget(self.rvt_local_port)
+        rvt.addWidget(self.rvt_start_btn)
+        rvt.addWidget(self.rvt_stop_btn)
+        rvt_w = QWidget(); rvt_w.setLayout(rvt)
+        ct_l.addWidget(rvt_w)
         # Console area (pane container)
         self.console_area = ConsoleArea()
         ct_l.addWidget(self.console_area, 1)
@@ -290,6 +310,7 @@ class MonitorPage(QWidget):
         # Wiring
         self.script_browse.clicked.connect(self._on_browse_script)
         self.use_docker_cb.toggled.connect(self._on_docker_toggle)
+        # No target wiring
         # Drive hidden checkbox via visual toggle buttons
         try:
             self.mode_conda_btn.toggled.connect(lambda checked: (self.use_docker_cb.setChecked(False) if checked else None))
@@ -320,6 +341,9 @@ class MonitorPage(QWidget):
             self.console_clear_btn.clicked.connect(lambda: self.console_area.clear_active())
             self.console_split_h_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Horizontal))
             self.console_split_v_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Vertical))
+            # Reverse tunnel wiring
+            self.rvt_start_btn.clicked.connect(lambda: getattr(self._mw, '_start_reverse_tunnel')() if getattr(self, '_mw', None) and hasattr(self._mw, '_start_reverse_tunnel') else None)
+            self.rvt_stop_btn.clicked.connect(lambda: getattr(self._mw, '_stop_reverse_tunnel')() if getattr(self, '_mw', None) and hasattr(self._mw, '_stop_reverse_tunnel') else None)
         except Exception:
             pass
 
@@ -468,6 +492,8 @@ class MonitorPage(QWidget):
 
     def _notify_parent_update_preview(self) -> None:
         self.preview_update_req.emit()
+
+    # No target helper needed
 
     def _apply_column_ratio(self, table: QTableWidget, r_first: float = 1.0/3.0) -> None:
         try:

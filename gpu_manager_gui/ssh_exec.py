@@ -699,3 +699,249 @@ class RemoteListDirJob(QThread):
                 t, name = 'O', ln
             entries.append({'type': t, 'name': name})
         self.result.emit(cwd, entries)
+
+
+class ReverseTunnelJob(QThread):
+    """Run an ssh reverse tunnel: ssh -R <bind>:localhost:<local> user@host -p <port> -N -T
+
+    Uses system ssh; supports identity file; non-interactive. Emits debug and error.
+    """
+    started = pyqtSignal()
+    stopped = pyqtSignal(int)
+    error = pyqtSignal(str)
+    debug = pyqtSignal(str)
+
+    def __init__(self, remote_host: str, remote_port: int, remote_user: str | None, bind_port: int, local_port: int, identity: str | None) -> None:
+        super().__init__()
+        self._r_host = remote_host
+        self._r_port = int(remote_port)
+        self._r_user = remote_user or ""
+        self._bind = int(bind_port)
+        self._lport = int(local_port)
+        self._identity = identity
+        self._proc = None
+        self._stop = False
+
+    def run(self) -> None:  # type: ignore[override]
+        dest = f"{self._r_user}@{self._r_host}" if self._r_user else self._r_host
+        cmd = [
+            "ssh",
+            "-p", str(self._r_port),
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+            "-N", "-T",
+            "-R", f"{self._bind}:localhost:{self._lport}",
+            dest,
+        ]
+        if self._identity:
+            cmd[1:1] = ["-i", self._identity]
+        try:
+            import subprocess, time, threading, sys as _sys
+            self.debug.emit("[reverse-tunnel] cmd: " + " ".join(cmd))
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+            self._proc = p
+            # Pump stderr in background so early failures become visible in UI
+            def _pump_err():
+                try:
+                    if p.stderr is None:
+                        return
+                    for line in p.stderr:
+                        if not line:
+                            break
+                        self.debug.emit(line.rstrip("\n"))
+                except Exception:
+                    pass
+            t = threading.Thread(target=_pump_err, name="ssh-revtun-stderr", daemon=True)
+            t.start()
+            self.started.emit()
+            # Keep thread alive while process runs
+            while not self._stop:
+                rc = p.poll()
+                if rc is not None:
+                    break
+                time.sleep(0.2)
+            if self._stop and p.poll() is None:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+                try:
+                    p.wait(timeout=2)
+                except Exception:
+                    pass
+            rc = p.poll()
+            self.stopped.emit(0 if rc is None else rc)
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(str(e))
+
+
+class ReverseTunnelParamikoJob(QThread):
+    """Reverse SSH tunnel using Paramiko Transport.request_port_forward.
+
+    Binds a remote port on the server to forward to local localhost:<local_port>.
+    Supports password and/or key auth; accepts new host keys automatically.
+    """
+    started = pyqtSignal()
+    stopped = pyqtSignal(int)
+    error = pyqtSignal(str)
+    debug = pyqtSignal(str)
+
+    def __init__(self, remote_host: str, remote_port: int, remote_user: str | None, password: str | None, identity: str | None, bind_port: int, local_port: int, bind_addr: str = "127.0.0.1") -> None:
+        super().__init__()
+        self._r_host = remote_host
+        self._r_port = int(remote_port)
+        self._r_user = remote_user or None
+        self._password = password or None
+        self._identity = identity or None
+        self._bind_port = int(bind_port)
+        self._local_port = int(local_port)
+        self._bind_addr = bind_addr
+        self._stop = False
+        self._client = None
+        self._transport = None
+        self._threads: list = []
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            import paramiko  # type: ignore
+        except Exception:
+            self.error.emit("paramiko not installed; please pip install paramiko")
+            return
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=self._r_host,
+                port=self._r_port,
+                username=self._r_user,
+                password=self._password,
+                key_filename=self._identity,
+                timeout=10.0,
+                banner_timeout=15.0,
+                auth_timeout=15.0,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            self._client = client
+            transport = client.get_transport()
+            self._transport = transport
+            # Request remote port forward on loopback (matches ssh -R default)
+            try:
+                transport.request_port_forward(self._bind_addr, self._bind_port)
+            except Exception as e:
+                self.error.emit(f"request_port_forward failed: {e}")
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return
+            self.debug.emit(f"[reverse-tunnel:paramiko] remote bind {self._bind_addr}:{self._bind_port} -> localhost:{self._local_port}")
+            self.started.emit()
+
+            import socket, threading, time
+
+            def _handle(chan):
+                # Open local socket and shuttle data both ways
+                try:
+                    lsock = socket.create_connection(("127.0.0.1", self._local_port), timeout=5)
+                except Exception as e:
+                    try:
+                        chan.close()
+                    except Exception:
+                        pass
+                    self.debug.emit(f"[reverse-tunnel:paramiko] local connect failed: {e}")
+                    return
+
+                def c2l():
+                    try:
+                        while not self._stop:
+                            data = chan.recv(4096)
+                            if not data:
+                                break
+                            lsock.sendall(data)
+                    except Exception:
+                        pass
+                    try:
+                        lsock.shutdown(socket.SHUT_WR)
+                    except Exception:
+                        pass
+
+                def l2c():
+                    try:
+                        while not self._stop:
+                            data = lsock.recv(4096)
+                            if not data:
+                                break
+                            chan.sendall(data)
+                    except Exception:
+                        pass
+                    try:
+                        chan.shutdown(1)
+                    except Exception:
+                        pass
+
+                t1 = threading.Thread(target=c2l, name="rt-c2l", daemon=True)
+                t2 = threading.Thread(target=l2c, name="rt-l2c", daemon=True)
+                t1.start(); t2.start()
+                self._threads.append(t1); self._threads.append(t2)
+                # Wait for both directions to finish
+                t1.join(); t2.join()
+                try:
+                    lsock.close()
+                except Exception:
+                    pass
+                try:
+                    chan.close()
+                except Exception:
+                    pass
+
+            # Accept incoming reverse connections
+            while not self._stop and transport and transport.is_active():
+                chan = transport.accept(0.5)
+                if chan is None:
+                    continue
+                try:
+                    th = threading.Thread(target=_handle, args=(chan,), name="rt-handler", daemon=True)
+                    th.start()
+                except Exception:
+                    try:
+                        chan.close()
+                    except Exception:
+                        pass
+            # Cleanup
+            try:
+                if transport and transport.is_active():
+                    try:
+                        transport.cancel_port_forward(self._bind_addr, self._bind_port)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            self.stopped.emit(0)
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(str(e))
+
+    def stop_tunnel(self) -> None:
+        self._stop = True
+        try:
+            if self._transport is not None:
+                try:
+                    self._transport.cancel_port_forward(self._bind_addr, self._bind_port)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def stop_tunnel(self) -> None:
+        self._stop = True
+        try:
+            if self._proc is not None:
+                self._proc.terminate()
+        except Exception:
+            pass
