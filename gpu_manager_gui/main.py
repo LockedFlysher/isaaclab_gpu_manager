@@ -459,6 +459,115 @@ class ConsoleArea(QWidget):
         except Exception:
             pass
 
+    def close_active(self) -> None:
+        """Remove the active terminal pane from the layout, collapsing splitters."""
+        try:
+            tgt = self._active
+        except Exception:
+            return
+        # If root is the only terminal, replace with a fresh one to keep area usable
+        if self._root is tgt:
+            try:
+                self._v.removeWidget(self._root)
+            except Exception:
+                pass
+            try:
+                self._root.setParent(None)
+            except Exception:
+                pass
+            new_t = TerminalWidget()
+            self._hook_terminal(new_t)
+            self._root = new_t
+            self._v.addWidget(new_t)
+            self._active = new_t
+            try:
+                new_t.setFocus()
+            except Exception:
+                pass
+            return
+        # Find parent splitter of tgt
+        parent, idx = self._find_parent_splitter(self._root, tgt)
+        if parent is None or idx < 0:
+            # Fallback: treat as root removal
+            try:
+                self._v.removeWidget(self._root)
+            except Exception:
+                pass
+            try:
+                self._root.setParent(None)
+            except Exception:
+                pass
+            new_t = TerminalWidget(); self._hook_terminal(new_t)
+            self._root = new_t
+            self._v.addWidget(new_t)
+            self._active = new_t
+            return
+        # Remove target from parent splitter
+        try:
+            w = parent.widget(idx)
+            if w is not None:
+                w.setParent(None)
+        except Exception:
+            pass
+        # If only one child remains, collapse splitter into its child
+        try:
+            if parent.count() == 1:
+                only = parent.widget(0)
+                gparent, gidx = self._find_parent_splitter(self._root, parent)
+                if gparent is None:
+                    # parent is root
+                    try:
+                        self._v.removeWidget(self._root)
+                    except Exception:
+                        pass
+                    try:
+                        self._root.setParent(None)
+                    except Exception:
+                        pass
+                    self._root = only
+                    self._v.addWidget(only)
+                else:
+                    # replace parent with only
+                    try:
+                        if hasattr(gparent, 'replaceWidget'):
+                            gparent.replaceWidget(gidx, only)
+                        else:
+                            gparent.insertWidget(gidx, only)
+                            try:
+                                gparent.widget(gidx + 1).setParent(None)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Pick a new active terminal: prefer the first terminal found
+        self._active = self._pick_any_terminal(self._root) or self._active
+        try:
+            self._active.setFocus()
+        except Exception:
+            pass
+
+    def _pick_any_terminal(self, node: QWidget):
+        from gpu_manager_gui.terminal_widget import TerminalWidget as _TW
+        # Depth-first search for a TerminalWidget
+        try:
+            if isinstance(node, _TW):
+                return node
+        except Exception:
+            pass
+        try:
+            from PyQt6.QtWidgets import QSplitter as _QS
+            if isinstance(node, _QS):
+                for i in range(node.count()):
+                    w = node.widget(i)
+                    t = self._pick_any_terminal(w)
+                    if t is not None:
+                        return t
+        except Exception:
+            pass
+        return None
+
 
 class MonitorPage(QWidget):
     disconnect_requested = pyqtSignal()
@@ -799,7 +908,7 @@ class MonitorPage(QWidget):
             # Container shell one-liner actions
             self.container_shell_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.container_shell_edit.text()))
             self.container_shell_run.clicked.connect(lambda: getattr(self._mw, '_run_preview_command')(self.container_shell_edit.text()) if getattr(self, '_mw', None) and hasattr(self._mw, '_run_preview_command') else None)
-            self.console_close_btn.clicked.connect(lambda: getattr(self._mw, '_close_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_close_console_shell') else None)
+            self.console_close_btn.clicked.connect(lambda: getattr(self._mw, '_close_console_pane')() if getattr(self, '_mw', None) and hasattr(self._mw, '_close_console_pane') else None)
             self.console_clear_btn.clicked.connect(lambda: self.console_area.clear_active())
             self.console_split_h_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Horizontal))
             self.console_split_v_btn.clicked.connect(lambda: self.console_area.split_active(Qt.Orientation.Vertical))
@@ -1831,6 +1940,25 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._console_shells.pop(t, None)
+
+    def _close_console_pane(self) -> None:
+        """Close the active console pane: stop shell if any, then remove the pane UI."""
+        t = self.monitor_page.console_area.active_terminal()
+        sh = self._console_shells.pop(t, None)
+        if sh is not None:
+            try:
+                sh.stop_shell()
+            except Exception:
+                pass
+            try:
+                t.detach_shell()
+            except Exception:
+                pass
+        # Remove pane from UI
+        try:
+            self.monitor_page.console_area.close_active()
+        except Exception:
+            pass
 
     # Fallback UI update if MonitorPage lacks update_snapshot (defensive)
     def _update_snapshot_fallback(self, snap: Snapshot) -> None:
