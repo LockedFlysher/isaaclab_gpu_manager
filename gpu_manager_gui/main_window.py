@@ -137,6 +137,8 @@ class MainWindow(QMainWindow):
             self.monitor_page.docker_refresh_req.connect(lambda: self._detect_remote_docker_containers(True))
             self.monitor_page.conda_refresh_req.connect(lambda: self._detect_remote_conda_envs(True))
             self.monitor_page.preview_update_req.connect(self._update_runner_preview)
+            # Also refresh Console preview on any preview update request
+            self.monitor_page.preview_update_req.connect(self._update_console_preview)
         except Exception:
             pass
         self.login_page.profile_combo.currentTextChanged.connect(self._load_profile_into_fields)
@@ -674,17 +676,36 @@ class MainWindow(QMainWindow):
 
     def _build_python_cmd(self, runner: Dict[str, Any]) -> str:
         script = runner.get("script") or ""
-        parts = ["python", shlex.quote(script)] if script else ["python"]
+        # Decide torch.distributed.run based on console GPU selection (>1) or explicit flag
+        gpu_list = runner.get('gpu_list') or []
+        try:
+            nproc = int(len(gpu_list)) if isinstance(gpu_list, (list, tuple)) else 0
+        except Exception:
+            nproc = 0
+        use_torchrun = bool(nproc > 1 or runner.get('use_torchrun', False))
+
+        parts: list[str] = ["python"]
+        if use_torchrun:
+            parts += ["-m", "torch.distributed.run", "--nnodes=1", f"--nproc_per_node={max(1, nproc)}"]
+        if script:
+            parts.append(shlex.quote(script))
+
+        # Script params; ensure --distributed present when using torchrun
+        have_distributed = False
         for k, v in runner.get("params", []):
             key = str(k).strip()
             if not key:
                 continue
+            if key == 'distributed' or key == '--distributed':
+                have_distributed = True
             if not key.startswith("--"):
                 key = "--" + key
             if v is None or v == "":
                 parts.append(key)
             else:
                 parts.append(f"{key}={shlex.quote(str(v))}")
+        if use_torchrun and not have_distributed:
+            parts.append("--distributed")
         return " ".join(parts)
 
     def _update_runner_preview(self) -> None:
@@ -711,15 +732,42 @@ class MainWindow(QMainWindow):
             return ""
 
     def _console_runner(self) -> Dict[str, Any]:
+        """Assemble runner dict for Console tab, overlaying GPU selection.
+
+        Does not alter Runner panel fields or saved config.
+        """
+        import copy as _copy
+        base = None
         name = self._console_selected_preset()
         if name:
             try:
-                r = config_store.load_runner_preset(self._config, name)
-                if r:
-                    return r
+                base = config_store.load_runner_preset(self._config, name)
             except Exception:
-                pass
-        return self._collect_runner()
+                base = None
+        if not base:
+            base = self._collect_runner()
+        r = _copy.deepcopy(base)
+        # Overlay CUDA_VISIBLE_DEVICES based on Console GPU selection
+        gsel: list[int] = []
+        try:
+            if hasattr(self.monitor_page, 'get_console_selected_gpus'):
+                gsel = list(self.monitor_page.get_console_selected_gpus())
+        except Exception:
+            gsel = []
+        try:
+            gsel = sorted({int(x) for x in gsel})
+        except Exception:
+            gsel = []
+        if gsel:
+            env_list = list(r.get('env', []))
+            env_list = [[k, v] for (k, v) in env_list if str(k).strip().upper() != 'CUDA_VISIBLE_DEVICES']
+            env_list.insert(0, ['CUDA_VISIBLE_DEVICES', ','.join(str(i) for i in gsel)])
+            r['env'] = env_list
+        try:
+            r['gpu_list'] = gsel
+        except Exception:
+            pass
+        return r
 
     def _update_console_preview(self) -> None:
         try:

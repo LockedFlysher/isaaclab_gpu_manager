@@ -227,8 +227,30 @@ class MonitorPage(QWidget):
         self.console_profile_combo = QComboBox(); self.console_profile_combo.setEditable(False); self.console_profile_combo.setMinimumWidth(200)
         cph.addWidget(self.console_profile_label)
         cph.addWidget(self.console_profile_combo)
+        # Inline GPUs selector to the right of Preset (no extra row)
+        try:
+            cph.addSpacing(12)
+        except Exception:
+            pass
+        self._gpu_lbl = QLabel("GPUs")
+        cph.addWidget(self._gpu_lbl)
+        self._gpu_box_wrap = QWidget()
+        self._gpu_box_layout = QHBoxLayout(self._gpu_box_wrap)
+        try:
+            self._gpu_box_layout.setContentsMargins(0, 0, 0, 0)
+            self._gpu_box_layout.setSpacing(4)
+        except Exception:
+            pass
+        cph.addWidget(self._gpu_box_wrap, 1)
+        self.gpu_sel_all_btn = QToolButton(); self.gpu_sel_all_btn.setText("全选")
+        self.gpu_sel_none_btn = QToolButton(); self.gpu_sel_none_btn.setText("清空")
+        cph.addWidget(self.gpu_sel_all_btn)
+        cph.addWidget(self.gpu_sel_none_btn)
         cph.addStretch(1)
         ct_l.addLayout(cph)
+        # Runtime holders
+        self._console_gpu_boxes = []  # type: list
+        self._console_gpu_count = 0
         # Share model with Runner preset combo and keep selection in sync
         try:
             self.console_profile_combo.setModel(self.preset_combo.model())
@@ -334,6 +356,9 @@ class MonitorPage(QWidget):
         except Exception:
             pass
         try:
+            # GPU selector events
+            self.gpu_sel_all_btn.clicked.connect(lambda: self._console_gpu_select_all(True))
+            self.gpu_sel_none_btn.clicked.connect(lambda: self._console_gpu_select_all(False))
             self.console_open_btn.clicked.connect(lambda: getattr(self._mw, '_open_console_shell')() if getattr(self, '_mw', None) and hasattr(self._mw, '_open_console_shell') else None)
             self.container_shell_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.container_shell_edit.text()))
             self.container_shell_run.clicked.connect(lambda: getattr(self._mw, '_run_preview_command')(self.container_shell_edit.text()) if getattr(self, '_mw', None) and hasattr(self._mw, '_run_preview_command') else None)
@@ -583,6 +608,11 @@ class MonitorPage(QWidget):
 
     def update_snapshot(self, snap: 'Snapshot') -> None:
         rows = len(snap.gpus)
+        # Keep GPU selector in Console tab synced with number of GPUs
+        try:
+            self._ensure_console_gpu_boxes(rows)
+        except Exception:
+            pass
         self.gpu_table.setRowCount(rows)
         procs_per_uuid = {}
         for app in snap.apps:
@@ -645,3 +675,65 @@ class MonitorPage(QWidget):
             self.console_profile_combo.setVisible(vis)
         except Exception:
             pass
+
+    # --- Console GPU selection helpers ---
+    def _ensure_console_gpu_boxes(self, n: int) -> None:
+        """Ensure GPU checkbox count matches n; preserve existing selections."""
+        try:
+            n = int(max(0, n))
+        except Exception:
+            n = 0
+        if n == self._console_gpu_count and self._console_gpu_boxes:
+            return
+        prev = set(self.get_console_selected_gpus())
+        # Clear any existing boxes
+        try:
+            while self._gpu_box_layout.count():
+                it = self._gpu_box_layout.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    w.deleteLater()
+        except Exception:
+            pass
+        self._console_gpu_boxes = []
+        from PyQt6.QtWidgets import QCheckBox as _QCB
+        for i in range(n):
+            cb = _QCB(str(i))
+            try:
+                cb.setChecked(i in prev)
+            except Exception:
+                pass
+            try:
+                cb.toggled.connect(lambda _=False, _i=i: self.preview_update_req.emit())
+            except Exception:
+                pass
+            self._gpu_box_layout.addWidget(cb)
+            self._console_gpu_boxes.append(cb)
+        try:
+            self._gpu_box_layout.addStretch(1)
+        except Exception:
+            pass
+        self._console_gpu_count = n
+
+    def _console_gpu_select_all(self, state: bool) -> None:
+        try:
+            for cb in self._console_gpu_boxes:
+                cb.blockSignals(True)
+                cb.setChecked(bool(state))
+                cb.blockSignals(False)
+        except Exception:
+            pass
+        self.preview_update_req.emit()
+
+    def get_console_selected_gpus(self) -> list[int]:
+        sel = []
+        try:
+            for idx, cb in enumerate(self._console_gpu_boxes):
+                try:
+                    if cb.isChecked():
+                        sel.append(idx)
+                except Exception:
+                    pass
+        except Exception:
+            return []
+        return sel
