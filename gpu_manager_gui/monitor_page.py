@@ -636,6 +636,36 @@ class MonitorPage(QWidget):
             procs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.gpu_table.setItem(r, 4, procs_item)
 
+        # Fill Top Processes table (by VRAM usage), limit to 10
+        try:
+            # Map GPU uuid -> index for display
+            uuid_to_idx = {gi.uuid: gi.index for gi in snap.gpus}
+            # Sort apps by used_memory_mib desc
+            top_apps = sorted(list(snap.apps), key=lambda a: getattr(a, 'used_memory_mib', 0), reverse=True)[:10]
+            self.proc_table.setRowCount(len(top_apps))
+            pid_user = getattr(snap, 'pid_user_map', {}) or {}
+            for i, app in enumerate(top_apps):
+                # PID
+                pid_it = QTableWidgetItem(str(app.pid))
+                pid_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.proc_table.setItem(i, 0, pid_it)
+                # User
+                user = pid_user.get(int(app.pid), 'unknown') if isinstance(pid_user, dict) else 'unknown'
+                self.proc_table.setItem(i, 1, QTableWidgetItem(str(user)))
+                # Mem (MiB)
+                mem_it = QTableWidgetItem(str(int(getattr(app, 'used_memory_mib', 0))))
+                mem_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.proc_table.setItem(i, 2, mem_it)
+                # GPU index
+                gidx = uuid_to_idx.get(app.gpu_uuid, '-')
+                gidx_it = QTableWidgetItem(str(gidx))
+                gidx_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.proc_table.setItem(i, 3, gidx_it)
+                # Name
+                self.proc_table.setItem(i, 4, QTableWidgetItem(app.process_name))
+        except Exception:
+            pass
+
         base_total = sum(max(0, g.mem_total_mib) for g in snap.gpus)
         used_total = sum(max(0, g.mem_used_mib) for g in snap.gpus)
         user_totals = dict(snap.user_vram_mib)
