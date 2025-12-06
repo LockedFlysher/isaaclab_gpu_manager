@@ -162,6 +162,13 @@ class MainWindow(QMainWindow):
             self.monitor_page.preset_del.clicked.connect(self._delete_preset)
         except Exception:
             pass
+        # Auto-load preset when user selects an item from the dropdown
+        try:
+            self.monitor_page.preset_combo.currentIndexChanged.connect(
+                lambda _=None: (self.monitor_page.preset_combo.currentText().strip() and self._load_preset_into_ui())
+            )
+        except Exception:
+            pass
 
         try:
             self.monitor_page.main_tabs._bar.currentChanged.connect(self._on_main_tab_changed)
